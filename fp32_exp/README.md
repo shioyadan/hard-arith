@@ -18,14 +18,16 @@ fp32_exp/
 ├── README.md
 ├── Makefile
 ├── test/
-│   ├── tb_fp32_exp.sv
-│   └── reference.c
-└── tools/
-    └── gen_constants.py
+│   ├── exhaustive.cpp
+│   ├── reference.c
+│   └── tb_fp32_exp.sv
+├── tools/
+│   ├── gen_constants.py
+│   └── run_exhaustive.py
 ```
 
 `fp32_exp.sv`だけが合成対象です。`test/`はテストベンチと参照モデル、
-`tools/`は定数再生成用です。
+`tools/`は定数再生成と全数検査用です。
 
 ## インターフェース
 
@@ -65,6 +67,67 @@ FP32Exp u_exp (
 
 最終段は24-bit仮数と1-bit guardだけを使い、stickyとties-to-evenを持ちません。
 そのためcorrect roundingは保証せず、仕様をFTZ参照値に対する最大1 ULPとしています。
+
+## 必要なツール
+
+- Verilator 5.x
+- C++17を扱えるGCCまたはClang
+- GCC libquadmath
+- GNU Make
+- Python 3と`mpmath`（定数の再生・照合時のみ）
+
+Verilator 5.020、GCC 13.3.0で動作を確認しています。
+
+## テスト
+
+リポジトリ直下から次を実行します。
+
+```sh
+make test-fp32_exp
+make lint-fp32_exp
+make exhaustive-fp32_exp
+make constants-check
+```
+
+`fp32_exp/`で直接`make test`、`make lint`、`make constants-check`を実行することもできます。
+既定のテストは特殊値、overflow/underflow境界、引数削減境界、固定seedの20万乱数入力、
+近似範囲から等間隔に選んだ20万入力の単調性を検査します。
+
+```sh
+make test-fp32_exp RANDOM_CYCLES=1000000 MONOTONIC_SAMPLES=1000000
+```
+
+参照モデルはbinary128の`expq`を使います。参照値から1 ULPを超えた場合、
+または非0有限出力がfaithful上下限から外れた場合にテストは失敗します。
+
+## 検証済み精度
+
+近似本体へ入る指数field 102～133、両符号、全仮数fieldの
+536,870,912入力をVerilatorで全列挙しました。出力subnormalはFTZ、最終丸めは
+`ROUND_OUTPUT=1`、参照値はbinary128 `expq`からbinary32へ丸めてからFTZしています。
+
+| 指標 | 全列挙範囲 | 参照出力が非0有限normal |
+|---|---:|---:|
+| 入力数 | 536,870,912 | 526,392,936 |
+| correct参照値と一致 | 509,138,243 | 498,660,267（94.73156513%） |
+| 1 ULP差 | 27,732,669 | 27,732,669 |
+| 1 ULP超過 | 0 | 0 |
+| 最大ULP | 1 | 1 |
+| faithful違反 | ― | 0 |
+| 単調性違反 | 0 | 0 |
+
+参照出力0は5,329,840件、`+Inf`は5,148,136件で、RTLの出力数とも一致しました。
+入力は数値の昇順に並べ、shard内とshard境界の単調性も検査しています。
+
+全数検査は次のコマンドで再実行できます。
+
+```sh
+make exhaustive-fp32_exp EXHAUSTIVE_JOBS=22 EXHAUSTIVE_CHUNKS=64
+```
+
+集計結果は`fp32_exp/build/exhaustive/summary.json`と`summary.txt`へ生成されます。
+これは近似データパスの全入力をbinary128参照値で検査した結果であり、
+全`2^32` bit patternの列挙や形式証明ではありません。
 
 ## アルゴリズム
 
@@ -160,55 +223,6 @@ EXP2_TABLE_Q30[j] = round(2^(j/64)*2^30)      // j=0..63
 | テーブル | 64×31 bit | `2^(j/64)`を復元する |
 | 補正乗算 | 23×25 bit | 小さい補正を主項へ加える |
 | 最終丸め | 25 bit | 仮数と指数carryを作る |
-
-## 必要なツール
-
-- Verilator 5.x
-- C++17を扱えるGCCまたはClang
-- GCC libquadmath
-- GNU Make
-- Python 3と`mpmath`（定数の再生・照合時のみ）
-
-Verilator 5.020、GCC 13.3.0で動作を確認しています。
-
-## テスト
-
-リポジトリ直下から次を実行します。
-
-```sh
-make test-fp32_exp
-make lint-fp32_exp
-make constants-check
-```
-
-`fp32_exp/`で直接`make test`、`make lint`、`make constants-check`を実行することもできます。
-既定のテストは特殊値、overflow/underflow境界、引数削減境界、固定seedの20万乱数入力、
-近似範囲から等間隔に選んだ20万入力の単調性を検査します。
-
-```sh
-make test-fp32_exp RANDOM_CYCLES=1000000 MONOTONIC_SAMPLES=1000000
-```
-
-参照モデルはbinary128の`expq`を使います。参照値から1 ULPを超えた場合、
-または非0有限出力がfaithful上下限から外れた場合にテストは失敗します。
-
-## 検証済み精度
-
-近似本体へ入る指数field 102～133、両符号、全仮数fieldの536,870,912入力を
-過去にVerilatorで全列挙しています。FTZ参照出力が0でも`+Inf`でもない
-526,392,936入力に対する結果は次のとおりです。
-
-| 指標 | 結果 |
-|---|---:|
-| correct参照値と一致 | 498,660,267（94.73156513%） |
-| 1 ULP差 | 27,732,669 |
-| 1 ULP超過 | 0 |
-| 最大ULP | 1 |
-| faithful違反 | 0 |
-| 単調性違反 | 0 |
-
-これは全`2^32` bit patternの形式証明ではありません。また、現在の`Makefile`は
-この全列挙を再実行するtargetを持たず、通常のサンプル検証だけを実行します。
 
 ## 合成時の注意
 

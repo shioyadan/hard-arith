@@ -12,13 +12,15 @@ TEST_TARGETS := $(addprefix test-,$(UNITS))
 CLEAN_TARGETS := $(addprefix clean-,$(UNITS))
 CONSTANT_CHECK_TARGETS := $(addprefix constants-check-,$(CONSTANT_UNITS))
 
-.PHONY: all lint test clean constants-check
+.PHONY: all lint test exhaustive clean constants-check
 
 all: test
 
 lint: $(LINT_TARGETS)
 
 test: $(TEST_TARGETS)
+
+exhaustive: exhaustive-fp32_exp
 
 clean: $(CLEAN_TARGETS)
 
@@ -29,6 +31,9 @@ lint-%:
 
 test-%:
 	$(MAKE) -C $* test
+
+exhaustive-%:
+	$(MAKE) -C $* exhaustive
 
 clean-%:
 	$(MAKE) -C $* clean

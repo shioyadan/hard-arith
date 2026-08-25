@@ -19,6 +19,7 @@
 ```sh
 make lint
 make test
+make exhaustive
 make constants-check
 ```
 
@@ -27,6 +28,7 @@ make constants-check
 ```sh
 make lint-fp32_exp
 make test-fp32_exp
+make exhaustive-fp32_exp
 ```
 
 ## ライセンス

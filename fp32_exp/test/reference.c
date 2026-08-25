@@ -118,6 +118,16 @@ uint32_t fp32_exp_faithful_bounds_ambiguous(uint32_t input)
     return (__float128)nearest == value;
 }
 
+uint64_t fp32_exp_ref_and_faithful_bounds(uint32_t input,
+                                          uint32_t *reference,
+                                          uint32_t *ambiguous)
+{
+    /* 全数検査用に最近接値とfaithful上下限をまとめて返す。 */
+    *reference = fp32_exp_ref(input);
+    *ambiguous = fp32_exp_faithful_bounds_ambiguous(input);
+    return fp32_exp_faithful_bounds(input);
+}
+
 uint32_t fp32_reduction_boundary(int32_t index)
 {
     __float128 boundary = (((__float128)index) + 0.5Q) *
