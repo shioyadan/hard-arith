@@ -31,6 +31,26 @@ make test-fp32_exp
 make exhaustive-fp32_exp
 ```
 
+## Dev container
+
+DockerとNode.js 20以上を用意し、[Dev Container CLI](https://github.com/devcontainers/cli)を
+npmで導入します。
+
+```sh
+npm install -g @devcontainers/cli
+```
+
+リポジトリ直下で次を実行すると、Verilator 5.020の環境を起動して
+テストします。
+
+```sh
+./launch.sh make test
+```
+
+引数なしの`./launch.sh`はコンテナ内のbashを開きます。
+ホスト側で生成した`build/`が残っている場合は、初回だけテスト前に
+`./launch.sh make clean`を実行してください。
+
 ## ライセンス
 
 Copyright 2026 Ryota Shioya

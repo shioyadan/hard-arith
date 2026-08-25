@@ -1,0 +1,7 @@
+{
+  "name": "hard-arith",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "remoteUser": "vscode"
+}
