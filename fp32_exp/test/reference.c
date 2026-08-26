@@ -37,10 +37,9 @@ uint32_t fp32_exp_ref(uint32_t input)
         return (input >> 31) ? 0 : UINT32_C(0x7f800000);
     }
 
-    /* binary128でexpを計算してからbinary32へ丸める。 */
+    /* binary128でexpを計算してからbinary32へ丸める。subnormalも保持する。 */
     result = float_to_bits((float)expq((__float128)bits_to_float(input)));
-    /* 既定RTLに合わせ、binary32 subnormalは+0へflushする。 */
-    return (result & UINT32_C(0x7f800000)) == 0 ? 0 : result;
+    return result;
 }
 
 uint64_t fp32_exp_faithful_bounds(uint32_t input)
@@ -116,16 +115,6 @@ uint32_t fp32_exp_faithful_bounds_ambiguous(uint32_t input)
     if (nearest == 1.0f)
         return 0;
     return (__float128)nearest == value;
-}
-
-uint64_t fp32_exp_ref_and_faithful_bounds(uint32_t input,
-                                          uint32_t *reference,
-                                          uint32_t *ambiguous)
-{
-    /* 全数検査用に最近接値とfaithful上下限をまとめて返す。 */
-    *reference = fp32_exp_ref(input);
-    *ambiguous = fp32_exp_faithful_bounds_ambiguous(input);
-    return fp32_exp_faithful_bounds(input);
 }
 
 uint32_t fp32_reduction_boundary(int32_t index)

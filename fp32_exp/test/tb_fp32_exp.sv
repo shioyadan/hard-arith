@@ -36,7 +36,7 @@ module FP32ExpTB;
         input int index
     );
 
-    FP32Exp dut (                                   // 既定parameterのFTZ・丸めON構成を検査する
+    FP32Exp dut (                                   // faithful固定構成を検査する
         .x(x),
         .result(result)
     );
@@ -73,7 +73,7 @@ module FP32ExpTB;
         begin
             x = input_bits;                          // DUTへ入力を与える
             #1;                                      // 組合せ回路の評価を進める
-            expected = fp32_exp_ref(input_bits);     // FTZ参照値を計算する
+            expected = fp32_exp_ref(input_bits);     // binary32参照値を計算する
             if (is_nan(result) && is_nan(expected))  // NaN payloadの差は許容する
                 ulp = 0;
             else if (result >= expected)             // 非負出力のbit pattern差をULPとする

@@ -1,258 +1,601 @@
-// Copyright 2026 Ryota Shioya
+// Copyright 2026 Ryota Shioya and Toru Koizumi
 // SPDX-License-Identifier: Apache-2.0
 
-#include <chrono>      // shardごとの実行時間を測る。
-#include <cstdint>     // 固定幅整数でbinary32 bit patternを扱う。
-#include <cstdlib>     // コマンドライン整数を変換する。
-#include <fstream>     // shard結果をJSONへ保存する。
-#include <iomanip>     // JSON内の浮動小数表示精度を固定する。
-#include <iostream>    // 引数エラーを表示する。
+#include <algorithm>
+#include <bit>
+#include <cmath>
+#include <cstdint>
+#include <cstdlib>
+#include <iomanip>
+#include <iostream>
+#include <limits>
+#include <memory>
+#include <string_view>
+#include <vector>
 
-#include "VFP32Exp.h" // Verilatorが生成したFP32 expのモデルを使う。
-#include "verilated.h"            // Verilatorモデルの実行環境を使う。
+#include <omp.h>
 
-extern "C" uint64_t fp32_exp_ref_and_faithful_bounds(
-    uint32_t input, uint32_t *reference,
-    uint32_t *ambiguous); // 1回のexpqでFTZ参照値、faithful上下限、曖昧性を得る。
+#include "VFP32Exp.h"
+#include "verilated.h"
+
+#ifdef FP32_EXP_USE_MPFR
+#include <mpfr.h>
+#endif
 
 namespace {
 
-constexpr uint64_t kMagnitudeCount = UINT64_C(1) << 28; // 32指数×2^23仮数の片符号分。
-constexpr uint64_t kTotalCount = UINT64_C(1) << 29;     // 2符号を含む全検査入力数。
-constexpr uint32_t kFractionMask = UINT32_C(0x007fffff); // binary32仮数fieldのmask。
-constexpr uint32_t kPositiveInfinity = UINT32_C(0x7f800000); // exp(x)の+Inf bit pattern。
+constexpr std::uint32_t kCanonicalQnan = 0x7fc00000u;
+constexpr std::uint32_t kPositiveInfinity = 0x7f800000u;
+constexpr std::uint32_t kMaximumFinite = 0x7f7fffffu;
+constexpr std::uint32_t kMinimumSubnormal = 0x00000001u;
+constexpr double kMinimumNormal = 0x1p-126;
+constexpr double kSubnormalUlp = 0x1p-149;
 
-uint32_t input_from_ordinal(uint64_t ordinal)
-{
-    uint64_t magnitude_rank;                              // 符号を除いた昇順位置を得る。
-    uint32_t sign;                                        // binary32の符号bitを作る。
-
-    if (ordinal < kMagnitudeCount) {                      // 前半は負入力を数値の昇順に並べる。
-        magnitude_rank = kMagnitudeCount - 1 - ordinal;   // 大きい絶対値から小さい絶対値へ進める。
-        sign = UINT32_C(0x80000000);                      // 負号を付ける。
-    } else {                                              // 後半は正入力を数値の昇順に並べる。
-        magnitude_rank = ordinal - kMagnitudeCount;       // 小さい絶対値から大きい絶対値へ進める。
-        sign = 0;                                         // 正号を付ける。
-    }
-    const uint32_t exponent = 102u +                      // 近似回路を使う最小指数fieldから始める。
-        static_cast<uint32_t>(magnitude_rank >> 23);      // 32個の指数fieldを選ぶ。
-    const uint32_t fraction = static_cast<uint32_t>(magnitude_rank) &
-        kFractionMask;                                    // 各指数で2^23仮数を全列挙する。
-    return sign | (exponent << 23) | fraction;             // binary32入力bit patternを組み立てる。
-}
-
-uint32_t ulp_distance(uint32_t actual, uint32_t reference)
-{
-    return actual >= reference ? actual - reference : reference - actual; // 非負出力のbit距離を返す。
-}
-
-struct Statistics {
-    uint64_t total = 0;                                   // shardで検査した全入力数。
-    uint64_t reference_zero = 0;                          // FTZ参照値が0の入力数。
-    uint64_t reference_infinity = 0;                      // 参照値が+Infの入力数。
-    uint64_t reference_finite = 0;                        // 参照値が非0有限normalの対象入力数。
-    uint64_t actual_zero = 0;                             // RTL出力が0の入力数。
-    uint64_t actual_infinity = 0;                         // RTL出力が+Infの入力数。
-    uint64_t correct = 0;                                 // 全範囲でcorrect参照と一致した数。
-    uint64_t one_ulp = 0;                                 // 全範囲で1 ULP異なった数。
-    uint64_t over_one_ulp = 0;                            // 全範囲で1 ULPを超えた数。
-    uint64_t finite_correct = 0;                          // 非0有限範囲でcorrect参照と一致した数。
-    uint64_t finite_one_ulp = 0;                          // 非0有限範囲で1 ULP異なった数。
-    uint64_t finite_over_one_ulp = 0;                     // 非0有限範囲で1 ULPを超えた数。
-    uint64_t faithful_valid = 0;                          // 非0有限範囲でfaithfulだった数。
-    uint64_t faithful_alternative = 0;                    // correctでないがfaithfulだった数。
-    uint64_t faithful_violation = 0;                      // faithful上下限から外れた数。
-    uint64_t faithful_below = 0;                          // faithful下限より小さかった数。
-    uint64_t faithful_above = 0;                          // faithful上限より大きかった数。
-    uint64_t faithful_ambiguous = 0;                      // binary128だけでは上下を確定できない数。
-    uint64_t monotonic_violation = 0;                     // shard内部で出力が減少した数。
-    uint32_t max_ulp = 0;                                 // 全範囲の最大ULP誤差。
-    uint32_t max_finite_ulp = 0;                          // 非0有限範囲の最大ULP誤差。
-    uint32_t worst_input = 0;                             // 全範囲最大ULPの入力。
-    uint32_t worst_actual = 0;                            // 全範囲最大ULPのRTL出力。
-    uint32_t worst_reference = 0;                         // 全範囲最大ULPのcorrect参照値。
-    uint32_t worst_finite_input = 0;                      // 非0有限範囲最大ULPの入力。
-    uint32_t worst_finite_actual = 0;                     // 非0有限範囲最大ULPのRTL出力。
-    uint32_t worst_finite_reference = 0;                  // 非0有限範囲最大ULPのcorrect参照値。
-    uint64_t first_faithful_ordinal = UINT64_MAX;         // 最初のfaithful違反位置。
-    uint32_t first_faithful_input = 0;                    // 最初のfaithful違反入力。
-    uint32_t first_faithful_actual = 0;                   // 最初のfaithful違反RTL出力。
-    uint32_t first_faithful_lower = 0;                    // 最初のfaithful違反下限。
-    uint32_t first_faithful_upper = 0;                    // 最初のfaithful違反上限。
-    uint64_t first_monotonic_ordinal = UINT64_MAX;        // 最初の単調性違反位置。
-    uint32_t first_monotonic_previous_input = 0;          // 単調性違反直前の入力。
-    uint32_t first_monotonic_previous_actual = 0;         // 単調性違反直前の出力。
-    uint32_t first_monotonic_input = 0;                   // 単調性違反を起こした入力。
-    uint32_t first_monotonic_actual = 0;                  // 単調性違反を起こした出力。
+enum class Mode {
+    active,
+    full,
 };
 
-void write_json(const char *path, uint64_t start, uint64_t end,
-                uint32_t first_input, uint32_t first_actual,
-                uint32_t last_input, uint32_t last_actual,
-                double elapsed_seconds, const Statistics &s)
-{
-    std::ofstream out(path);                              // shard専用結果fileを開く。
-    if (!out) {                                           // 保存先を開けなければ検査結果を失わず停止する。
-        std::cerr << "結果を書けません: " << path << '\n';
-        std::exit(2);
-    }
-    out << std::setprecision(12);                         // throughput再計算に十分な桁を残す。
-    out << "{\n";                                       // Pythonが読むJSON objectを開始する。
-    out << "  \"start\": " << start << ",\n";
-    out << "  \"end\": " << end << ",\n";
-    out << "  \"first_input\": " << first_input << ",\n";
-    out << "  \"first_actual\": " << first_actual << ",\n";
-    out << "  \"last_input\": " << last_input << ",\n";
-    out << "  \"last_actual\": " << last_actual << ",\n";
-    out << "  \"total\": " << s.total << ",\n";
-    out << "  \"reference_zero\": " << s.reference_zero << ",\n";
-    out << "  \"reference_infinity\": " << s.reference_infinity << ",\n";
-    out << "  \"reference_finite\": " << s.reference_finite << ",\n";
-    out << "  \"actual_zero\": " << s.actual_zero << ",\n";
-    out << "  \"actual_infinity\": " << s.actual_infinity << ",\n";
-    out << "  \"correct\": " << s.correct << ",\n";
-    out << "  \"one_ulp\": " << s.one_ulp << ",\n";
-    out << "  \"over_one_ulp\": " << s.over_one_ulp << ",\n";
-    out << "  \"finite_correct\": " << s.finite_correct << ",\n";
-    out << "  \"finite_one_ulp\": " << s.finite_one_ulp << ",\n";
-    out << "  \"finite_over_one_ulp\": " << s.finite_over_one_ulp << ",\n";
-    out << "  \"faithful_valid\": " << s.faithful_valid << ",\n";
-    out << "  \"faithful_alternative\": " << s.faithful_alternative << ",\n";
-    out << "  \"faithful_violation\": " << s.faithful_violation << ",\n";
-    out << "  \"faithful_below\": " << s.faithful_below << ",\n";
-    out << "  \"faithful_above\": " << s.faithful_above << ",\n";
-    out << "  \"faithful_ambiguous\": " << s.faithful_ambiguous << ",\n";
-    out << "  \"monotonic_violation\": " << s.monotonic_violation << ",\n";
-    out << "  \"max_ulp\": " << s.max_ulp << ",\n";
-    out << "  \"max_finite_ulp\": " << s.max_finite_ulp << ",\n";
-    out << "  \"worst_input\": " << s.worst_input << ",\n";
-    out << "  \"worst_actual\": " << s.worst_actual << ",\n";
-    out << "  \"worst_reference\": " << s.worst_reference << ",\n";
-    out << "  \"worst_finite_input\": " << s.worst_finite_input << ",\n";
-    out << "  \"worst_finite_actual\": " << s.worst_finite_actual << ",\n";
-    out << "  \"worst_finite_reference\": " << s.worst_finite_reference << ",\n";
-    out << "  \"first_faithful_ordinal\": " << s.first_faithful_ordinal << ",\n";
-    out << "  \"first_faithful_input\": " << s.first_faithful_input << ",\n";
-    out << "  \"first_faithful_actual\": " << s.first_faithful_actual << ",\n";
-    out << "  \"first_faithful_lower\": " << s.first_faithful_lower << ",\n";
-    out << "  \"first_faithful_upper\": " << s.first_faithful_upper << ",\n";
-    out << "  \"first_monotonic_ordinal\": " << s.first_monotonic_ordinal << ",\n";
-    out << "  \"first_monotonic_previous_input\": " << s.first_monotonic_previous_input << ",\n";
-    out << "  \"first_monotonic_previous_actual\": " << s.first_monotonic_previous_actual << ",\n";
-    out << "  \"first_monotonic_input\": " << s.first_monotonic_input << ",\n";
-    out << "  \"first_monotonic_actual\": " << s.first_monotonic_actual << ",\n";
-    out << "  \"elapsed_seconds\": " << elapsed_seconds << "\n";
-    out << "}\n";                                        // JSON objectを閉じる。
+struct Options {
+    Mode mode = Mode::active;
+    int threads = 0;
+    bool mpfr_near_boundary = false;
+};
+
+struct Worst {
+    double absolute_ulp = -1.0;
+    double signed_ulp = 0.0;
+    std::uint32_t input = 0;
+    std::uint32_t output = 0;
+    std::uint32_t rounded_reference = 0;
+    std::uint32_t lower = 0;
+    std::uint32_t upper = 0;
+};
+
+struct Failure {
+    bool valid = false;
+    std::uint32_t input = 0;
+    std::uint32_t output = 0;
+    std::uint32_t lower = 0;
+    std::uint32_t upper = 0;
+};
+
+struct Stats {
+    std::uint64_t checks = 0;
+    std::uint64_t finite_checks = 0;
+    std::uint64_t faithful_failures = 0;
+    std::uint64_t special_checks = 0;
+    std::uint64_t special_mismatches = 0;
+    std::uint64_t rne_mismatches = 0;
+    std::uint64_t normal_checks = 0;
+    std::uint64_t subnormal_checks = 0;
+    std::uint64_t double_underflow_checks = 0;
+    std::uint64_t negative_outputs = 0;
+    std::uint64_t max_rne_steps = 0;
+    std::uint64_t digest_xor = 0;
+    std::uint64_t digest_sum = 0;
+    std::uint64_t mpfr_near_candidates = 0;
+    std::uint64_t mpfr_near_failures = 0;
+    std::uint64_t mpfr_interval_ambiguous = 0;
+    std::uint64_t zero_endpoint_analytic_checks = 0;
+    std::uint64_t unit_endpoint_analytic_checks = 0;
+    std::uint64_t analytic_endpoint_failures = 0;
+    std::uint64_t mpfr_max_precision = 0;
+    Worst normal_worst{};
+    Worst subnormal_worst{};
+    Failure first_failure{};
+};
+
+std::uint64_t mix64(std::uint64_t value) {
+    value += 0x9e3779b97f4a7c15ULL;
+    value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    value = (value ^ (value >> 27)) * 0x94d049bb133111ebULL;
+    return value ^ (value >> 31);
 }
 
-} // namespace
+std::uint64_t distance(std::uint32_t lhs, std::uint32_t rhs) {
+    return lhs >= rhs ? static_cast<std::uint64_t>(lhs - rhs)
+                      : static_cast<std::uint64_t>(rhs - lhs);
+}
 
-int main(int argc, char **argv)
-{
-    if (argc != 4) {                                      // start、end、出力先を必須にする。
-        std::cerr << "usage: " << argv[0] << " START END OUTPUT_JSON\n";
-        return 2;
+void update_worst(
+    Worst& worst,
+    double signed_ulp,
+    std::uint32_t input,
+    std::uint32_t output,
+    std::uint32_t rounded_reference,
+    std::uint32_t lower,
+    std::uint32_t upper) {
+    const double absolute = std::abs(signed_ulp);
+    if (absolute > worst.absolute_ulp
+        || (absolute == worst.absolute_ulp && input < worst.input)) {
+        worst = {
+            absolute,
+            signed_ulp,
+            input,
+            output,
+            rounded_reference,
+            lower,
+            upper,
+        };
     }
-    const uint64_t start = std::strtoull(argv[1], nullptr, 0); // shard先頭ordinalを読む。
-    const uint64_t end = std::strtoull(argv[2], nullptr, 0);   // shard終端ordinalを読む。
-    if (start >= end || end > kTotalCount) {              // 空範囲や全検査範囲外を拒否する。
-        std::cerr << "不正な範囲: " << start << ".." << end << '\n';
-        return 2;
+}
+
+void update_failure(
+    Failure& failure,
+    std::uint32_t input,
+    std::uint32_t output,
+    std::uint32_t lower,
+    std::uint32_t upper) {
+    if (!failure.valid || input < failure.input) {
+        failure = {true, input, output, lower, upper};
+    }
+}
+
+void merge_worst(Worst& target, const Worst& source) {
+    if (source.absolute_ulp > target.absolute_ulp
+        || (source.absolute_ulp == target.absolute_ulp
+            && source.input < target.input)) {
+        target = source;
+    }
+}
+
+void merge_stats(Stats& target, const Stats& source) {
+    target.checks += source.checks;
+    target.finite_checks += source.finite_checks;
+    target.faithful_failures += source.faithful_failures;
+    target.special_checks += source.special_checks;
+    target.special_mismatches += source.special_mismatches;
+    target.rne_mismatches += source.rne_mismatches;
+    target.normal_checks += source.normal_checks;
+    target.subnormal_checks += source.subnormal_checks;
+    target.double_underflow_checks += source.double_underflow_checks;
+    target.negative_outputs += source.negative_outputs;
+    target.max_rne_steps =
+        std::max(target.max_rne_steps, source.max_rne_steps);
+    target.digest_xor ^= source.digest_xor;
+    target.digest_sum += source.digest_sum;
+    target.mpfr_near_candidates += source.mpfr_near_candidates;
+    target.mpfr_near_failures += source.mpfr_near_failures;
+    target.mpfr_interval_ambiguous += source.mpfr_interval_ambiguous;
+    target.zero_endpoint_analytic_checks +=
+        source.zero_endpoint_analytic_checks;
+    target.unit_endpoint_analytic_checks +=
+        source.unit_endpoint_analytic_checks;
+    target.analytic_endpoint_failures +=
+        source.analytic_endpoint_failures;
+    target.mpfr_max_precision =
+        std::max(target.mpfr_max_precision, source.mpfr_max_precision);
+    merge_worst(target.normal_worst, source.normal_worst);
+    merge_worst(target.subnormal_worst, source.subnormal_worst);
+    if (source.first_failure.valid) {
+        update_failure(
+            target.first_failure,
+            source.first_failure.input,
+            source.first_failure.output,
+            source.first_failure.lower,
+            source.first_failure.upper);
+    }
+}
+
+std::uint32_t input_for_index(Mode mode, std::uint64_t index) {
+    if (mode == Mode::full) return static_cast<std::uint32_t>(index);
+
+    const std::uint32_t slot = static_cast<std::uint32_t>(index >> 23);
+    const std::uint32_t fraction = static_cast<std::uint32_t>(index)
+                                 & 0x007fffffu;
+    return ((slot >> 5) << 31)
+         | ((102u + (slot & 31u)) << 23)
+         | fraction;
+}
+
+#ifdef FP32_EXP_USE_MPFR
+void audit_near_boundary(
+    float input,
+    double binary64_exp,
+    std::uint32_t rounded_bits,
+    std::uint32_t output_bits,
+    Stats& stats) {
+    constexpr double kNearThreshold = 0x1p-20;
+
+    // exp(x) is strictly positive.  Values near the zero grid point always
+    // have the exact binary32 bracketing pair [0, minimum subnormal], so they
+    // do not need an individual MPFR call (this region contains many inputs).
+    if (binary64_exp == 0.0) {
+        ++stats.zero_endpoint_analytic_checks;
+        if (output_bits != 0 && output_bits != kMinimumSubnormal) {
+            ++stats.analytic_endpoint_failures;
+        }
+        return;
+    }
+    if (!(binary64_exp > 0.0) || !std::isfinite(binary64_exp)) return;
+    if (rounded_bits == 0) {
+        if (binary64_exp / kSubnormalUlp <= kNearThreshold) {
+            ++stats.zero_endpoint_analytic_checks;
+            if (output_bits != 0 && output_bits != kMinimumSubnormal) {
+                ++stats.analytic_endpoint_failures;
+            }
+        }
+        return;
+    }
+    if (rounded_bits >= kPositiveInfinity) return;
+
+    const float rounded = std::bit_cast<float>(rounded_bits);
+    const double ulp = binary64_exp >= kMinimumNormal
+        ? std::ldexp(1.0, std::ilogb(binary64_exp) - 23)
+        : kSubnormalUlp;
+    const double grid_distance =
+        std::abs(binary64_exp - static_cast<double>(rounded)) / ulp;
+    if (grid_distance > kNearThreshold) return;
+
+    // A large set of tiny |x| values maps very close to the exact grid point
+    // 1.  Monotonicity gives the bracket without one MPFR call per input:
+    // x<0 -> [prev(1),1], x=0 -> [1,1], x>0 -> [1,next(1)].
+    if (rounded_bits == 0x3f800000u) {
+        ++stats.unit_endpoint_analytic_checks;
+        std::uint32_t lower = 0x3f800000u;
+        std::uint32_t upper = 0x3f800000u;
+        if (input > 0.0f) upper = 0x3f800001u;
+        if (input < 0.0f) lower = 0x3f7fffffu;
+        if (output_bits != lower && output_bits != upper) {
+            ++stats.analytic_endpoint_failures;
+        }
+        return;
     }
 
-    VerilatedContext context;                              // shard内で独立したVerilator状態を持つ。
-    VFP32Exp dut{&context};                    // FP32 exp FTZトップを一つ生成する。
-    Statistics s;                                         // shardの全指標を初期化する。
-    uint32_t previous_input = 0;                           // 単調性比較の直前入力を保持する。
-    uint32_t previous_actual = 0;                          // 単調性比較の直前出力を保持する。
-    uint32_t first_input = 0;                              // shard境界比較用の最初の入力。
-    uint32_t first_actual = 0;                             // shard境界比較用の最初の出力。
-    uint32_t last_input = 0;                               // shard境界比較用の最後の入力。
-    uint32_t last_actual = 0;                              // shard境界比較用の最後の出力。
-    const auto begin_time = std::chrono::steady_clock::now(); // wall time計測を始める。
+    ++stats.mpfr_near_candidates;
+    std::uint32_t certified_lower = 0;
+    std::uint32_t certified_upper = 0;
+    bool certified = false;
+    for (mpfr_prec_t precision = 256; precision <= 4096; precision *= 2) {
+        mpfr_t argument;
+        mpfr_t lower_bound;
+        mpfr_t upper_bound;
+        mpfr_init2(argument, precision);
+        mpfr_init2(lower_bound, precision);
+        mpfr_init2(upper_bound, precision);
+        mpfr_set_flt(argument, input, MPFR_RNDN);
+        mpfr_exp(lower_bound, argument, MPFR_RNDD);
+        mpfr_exp(upper_bound, argument, MPFR_RNDU);
 
-    for (uint64_t ordinal = start; ordinal < end; ++ordinal) { // shardの連続入力を全列挙する。
-        const uint32_t input = input_from_ordinal(ordinal); // 数値昇順のbinary32入力を得る。
-        dut.x = input;                                     // Verilatorモデルへ入力する。
-        dut.eval();                                        // 組合せ回路を評価する。
-        const uint32_t actual = dut.result;                // RTLのbinary32出力bitを読む。
-        uint32_t reference;                                // correctly-rounded FTZ参照値を受ける。
-        uint32_t ambiguous;                                // binary128で上下を決めにくいか受ける。
-        const uint64_t bounds =                            // 同じexpqからfaithful上下限も得る。
-            fp32_exp_ref_and_faithful_bounds(input, &reference, &ambiguous);
-        const uint32_t lower = static_cast<uint32_t>(bounds); // faithful下限を分離する。
-        const uint32_t upper = static_cast<uint32_t>(bounds >> 32); // faithful上限を分離する。
-        const uint32_t ulp = ulp_distance(actual, reference); // correct参照値とのbit距離を得る。
-        const bool finite_target = reference != 0 &&       // FTZ出力が0でないことを要求する。
-            reference != kPositiveInfinity;               // 出力が+Infでない対象だけを選ぶ。
+        const std::uint32_t lower_from_lower = std::bit_cast<std::uint32_t>(
+            mpfr_get_flt(lower_bound, MPFR_RNDD));
+        const std::uint32_t lower_from_upper = std::bit_cast<std::uint32_t>(
+            mpfr_get_flt(upper_bound, MPFR_RNDD));
+        const std::uint32_t upper_from_lower = std::bit_cast<std::uint32_t>(
+            mpfr_get_flt(lower_bound, MPFR_RNDU));
+        const std::uint32_t upper_from_upper = std::bit_cast<std::uint32_t>(
+            mpfr_get_flt(upper_bound, MPFR_RNDU));
+        mpfr_clear(argument);
+        mpfr_clear(lower_bound);
+        mpfr_clear(upper_bound);
 
-        ++s.total;                                         // 全検査数を進める。
-        if (ambiguous != 0) ++s.faithful_ambiguous;        // 参照精度の曖昧な入力を数える。
-        if (reference == 0) ++s.reference_zero;            // 参照値0を分類する。
-        else if (reference == kPositiveInfinity) ++s.reference_infinity; // 参照値+Infを分類する。
-        else ++s.reference_finite;                         // 非0有限normalを分類する。
-        if (actual == 0) ++s.actual_zero;                  // RTL値0を分類する。
-        if (actual == kPositiveInfinity) ++s.actual_infinity; // RTL値+Infを分類する。
-
-        if (ulp == 0) ++s.correct;                         // correct一致を数える。
-        else if (ulp == 1) ++s.one_ulp;                    // 1 ULP差を数える。
-        else ++s.over_one_ulp;                             // 1 ULP超過を数える。
-        if (ulp > s.max_ulp) {                             // 全範囲の最大ULP例を更新する。
-            s.max_ulp = ulp;
-            s.worst_input = input;
-            s.worst_actual = actual;
-            s.worst_reference = reference;
+        stats.mpfr_max_precision = std::max(
+            stats.mpfr_max_precision,
+            static_cast<std::uint64_t>(precision));
+        if (lower_from_lower == lower_from_upper
+            && upper_from_lower == upper_from_upper) {
+            certified_lower = lower_from_lower;
+            certified_upper = upper_from_lower;
+            certified = true;
+            break;
         }
-
-        if (finite_target) {                               // ユーザ指定の非0有限出力範囲を評価する。
-            if (ulp == 0) ++s.finite_correct;              // 対象範囲のcorrect一致を数える。
-            else if (ulp == 1) ++s.finite_one_ulp;         // 対象範囲の1 ULP差を数える。
-            else ++s.finite_over_one_ulp;                  // 対象範囲の1 ULP超過を数える。
-            if (ulp > s.max_finite_ulp) {                  // 対象範囲の最大ULP例を更新する。
-                s.max_finite_ulp = ulp;
-                s.worst_finite_input = input;
-                s.worst_finite_actual = actual;
-                s.worst_finite_reference = reference;
-            }
-            if (actual == lower || actual == upper) {      // 厳密値を挟む二つのbinary32か調べる。
-                ++s.faithful_valid;
-                if (actual != reference)                  // correctでない許容隣接値を分ける。
-                    ++s.faithful_alternative;
-            } else {                                      // 上下限の外側ならfaithful違反とする。
-                ++s.faithful_violation;
-                if (actual < lower) ++s.faithful_below;    // 下側違反を数える。
-                else ++s.faithful_above;                   // 上側違反を数える。
-                if (s.first_faithful_ordinal == UINT64_MAX) { // 最初の違反例だけを保存する。
-                    s.first_faithful_ordinal = ordinal;
-                    s.first_faithful_input = input;
-                    s.first_faithful_actual = actual;
-                    s.first_faithful_lower = lower;
-                    s.first_faithful_upper = upper;
-                }
-            }
-        }
-
-        if (ordinal == start) {                            // shard最初の境界値を保存する。
-            first_input = input;
-            first_actual = actual;
-        } else if (actual < previous_actual) {             // 数値昇順入力で出力が減ったか調べる。
-            ++s.monotonic_violation;
-            if (s.first_monotonic_ordinal == UINT64_MAX) { // 最初の単調性違反だけを保存する。
-                s.first_monotonic_ordinal = ordinal;
-                s.first_monotonic_previous_input = previous_input;
-                s.first_monotonic_previous_actual = previous_actual;
-                s.first_monotonic_input = input;
-                s.first_monotonic_actual = actual;
-            }
-        }
-        previous_input = last_input = input;               // 次入力とshard境界用に現在値を保存する。
-        previous_actual = last_actual = actual;            // 次出力とshard境界用に現在値を保存する。
     }
-    dut.final();                                           // Verilatorモデルの終了処理を行う。
-    const auto finish_time = std::chrono::steady_clock::now(); // wall time計測を終える。
-    const double elapsed_seconds =                         // shardの経過秒へ変換する。
-        std::chrono::duration<double>(finish_time - begin_time).count();
-    write_json(argv[3], start, end, first_input, first_actual, // 集計に必要な全指標を保存する。
-               last_input, last_actual, elapsed_seconds, s);
-    return 0;                                              // shardが最後まで完了したことを返す。
+
+    if (!certified) {
+        ++stats.mpfr_interval_ambiguous;
+        return;
+    }
+    if (output_bits != certified_lower && output_bits != certified_upper) {
+        ++stats.mpfr_near_failures;
+    }
+}
+#endif
+
+void check_one(
+    VFP32Exp& dut,
+    std::uint32_t input_bits,
+    const Options& options,
+    Stats& stats) {
+    dut.x = input_bits;
+    dut.eval();
+    const std::uint32_t output_bits = dut.result;
+    ++stats.checks;
+
+    const std::uint64_t pair =
+        (static_cast<std::uint64_t>(input_bits) << 32) | output_bits;
+    stats.digest_xor ^= mix64(pair);
+    stats.digest_sum += mix64(pair ^ 0xd1b54a32d192ed03ULL);
+
+    if ((output_bits & 0x80000000u) != 0) ++stats.negative_outputs;
+
+    const std::uint32_t input_exponent = (input_bits >> 23) & 0xffu;
+    const std::uint32_t input_fraction = input_bits & 0x007fffffu;
+    if (input_exponent == 0xffu) {
+        ++stats.special_checks;
+        const std::uint32_t expected = input_fraction != 0
+            ? kCanonicalQnan
+            : ((input_bits >> 31) != 0 ? 0u : kPositiveInfinity);
+        if (output_bits != expected) {
+            ++stats.special_mismatches;
+            update_failure(
+                stats.first_failure,
+                input_bits,
+                output_bits,
+                expected,
+                expected);
+        }
+        return;
+    }
+
+    ++stats.finite_checks;
+    const float input = std::bit_cast<float>(input_bits);
+    const double exact = std::exp(static_cast<double>(input));
+
+    std::uint32_t rounded_bits = 0;
+    std::uint32_t lower = 0;
+    std::uint32_t upper = 0;
+    if (exact == 0.0) {
+        // The real exp(x) is positive.  A binary64 underflow therefore lies
+        // between +0 and the minimum positive binary32 subnormal.
+        ++stats.double_underflow_checks;
+        rounded_bits = 0;
+        lower = 0;
+        upper = kMinimumSubnormal;
+    } else if (std::isinf(exact)) {
+        rounded_bits = kPositiveInfinity;
+        lower = kMaximumFinite;
+        upper = kPositiveInfinity;
+    } else {
+        const float rounded = static_cast<float>(exact);
+        rounded_bits = std::bit_cast<std::uint32_t>(rounded);
+        if (std::isinf(rounded)) {
+            lower = kMaximumFinite;
+            upper = kPositiveInfinity;
+        } else if (static_cast<double>(rounded) < exact) {
+            lower = rounded_bits;
+            upper = rounded_bits + 1;
+        } else if (static_cast<double>(rounded) > exact) {
+            lower = rounded_bits - 1;
+            upper = rounded_bits;
+        } else {
+            lower = rounded_bits;
+            upper = rounded_bits;
+        }
+    }
+
+#ifdef FP32_EXP_USE_MPFR
+    if (options.mpfr_near_boundary) {
+        audit_near_boundary(
+            input,
+            exact,
+            rounded_bits,
+            output_bits,
+            stats);
+    }
+#else
+    (void)options;
+#endif
+
+    if (output_bits != rounded_bits) ++stats.rne_mismatches;
+    stats.max_rne_steps = std::max(
+        stats.max_rne_steps, distance(output_bits, rounded_bits));
+
+    if (output_bits != lower && output_bits != upper) {
+        ++stats.faithful_failures;
+        update_failure(
+            stats.first_failure,
+            input_bits,
+            output_bits,
+            lower,
+            upper);
+    }
+
+    if (!(exact > 0.0) || !std::isfinite(exact)) return;
+    const float output = std::bit_cast<float>(output_bits);
+    if (!std::isfinite(output)) return;
+
+    const bool normal = exact >= kMinimumNormal;
+    const double ulp = normal
+        ? std::ldexp(1.0, std::ilogb(exact) - 23)
+        : kSubnormalUlp;
+    const double signed_ulp = (static_cast<double>(output) - exact) / ulp;
+    if (normal) {
+        ++stats.normal_checks;
+        update_worst(
+            stats.normal_worst,
+            signed_ulp,
+            input_bits,
+            output_bits,
+            rounded_bits,
+            lower,
+            upper);
+    } else {
+        ++stats.subnormal_checks;
+        update_worst(
+            stats.subnormal_worst,
+            signed_ulp,
+            input_bits,
+            output_bits,
+            rounded_bits,
+            lower,
+            upper);
+    }
+}
+
+Options parse_options(int argc, char** argv) {
+    Options options;
+    for (int index = 1; index < argc; ++index) {
+        const std::string_view argument = argv[index];
+        if (argument == "--active") {
+            options.mode = Mode::active;
+        } else if (argument == "--full") {
+            options.mode = Mode::full;
+        } else if (argument.starts_with("--threads=")) {
+            const std::string_view number = argument.substr(10);
+            char* end = nullptr;
+            const long value = std::strtol(number.data(), &end, 10);
+            if (end != number.data() + number.size() || value <= 0) {
+                std::cerr << "invalid thread count: " << number << '\n';
+                std::exit(2);
+            }
+            options.threads = static_cast<int>(value);
+        } else if (argument == "--mpfr-near-boundary") {
+#ifdef FP32_EXP_USE_MPFR
+            options.mpfr_near_boundary = true;
+#else
+            std::cerr << "--mpfr-near-boundary requires a build with "
+                         "-DFP32_EXP_USE_MPFR and -lmpfr\n";
+            std::exit(2);
+#endif
+        } else {
+            std::cerr << "usage: " << argv[0]
+                      << " [--active|--full] [--threads=N]"
+                         " [--mpfr-near-boundary]\n";
+            std::exit(2);
+        }
+    }
+    return options;
+}
+
+void print_worst(std::string_view prefix, const Worst& worst) {
+    std::cout << prefix << "_checks_present="
+              << (worst.absolute_ulp >= 0.0 ? 1 : 0) << '\n';
+    if (worst.absolute_ulp < 0.0) return;
+    std::cout << std::setprecision(18)
+              << prefix << "_worst_absolute_ulp=" << worst.absolute_ulp << '\n'
+              << prefix << "_worst_signed_ulp=" << worst.signed_ulp << '\n'
+              << prefix << "_worst_input_bits=0x" << std::hex
+              << std::setw(8) << std::setfill('0') << worst.input << '\n'
+              << prefix << "_worst_output_bits=0x" << std::setw(8)
+              << worst.output << '\n'
+              << prefix << "_worst_reference_bits=0x" << std::setw(8)
+              << worst.rounded_reference << '\n'
+              << prefix << "_worst_lower_bits=0x" << std::setw(8)
+              << worst.lower << '\n'
+              << prefix << "_worst_upper_bits=0x" << std::setw(8)
+              << worst.upper << '\n'
+              << std::dec << std::setfill(' ')
+              << prefix << "_worst_input=" << std::hexfloat
+              << std::bit_cast<float>(worst.input) << std::defaultfloat << '\n';
+}
+
+void report(const Options& options, int threads, const Stats& stats) {
+    const bool pass = stats.faithful_failures == 0
+                   && stats.special_mismatches == 0
+                   && stats.negative_outputs == 0
+                   && stats.mpfr_near_failures == 0
+                   && stats.analytic_endpoint_failures == 0
+                   && stats.mpfr_interval_ambiguous == 0;
+    std::cout << "oracle=std::exp(binary64); near-grid cases checked with optional MPFR; not a formal proof\n"
+              << "mode=" << (options.mode == Mode::full ? "full" : "active")
+              << '\n'
+              << "threads=" << threads << '\n'
+              << "checks=" << stats.checks << '\n'
+              << "finite_checks=" << stats.finite_checks << '\n'
+              << "faithful_failures=" << stats.faithful_failures << '\n'
+              << "special_checks=" << stats.special_checks << '\n'
+              << "special_mismatches=" << stats.special_mismatches << '\n'
+              << "rne_mismatches=" << stats.rne_mismatches << '\n'
+              << "max_rne_steps=" << stats.max_rne_steps << '\n'
+              << "normal_checks=" << stats.normal_checks << '\n'
+              << "subnormal_checks=" << stats.subnormal_checks << '\n'
+              << "double_underflow_checks="
+              << stats.double_underflow_checks << '\n'
+              << "negative_outputs=" << stats.negative_outputs << '\n'
+              << "digest_xor=0x" << std::hex << std::setw(16)
+              << std::setfill('0') << stats.digest_xor << '\n'
+              << "digest_sum=0x" << std::setw(16) << stats.digest_sum << '\n'
+              << std::dec << std::setfill(' ')
+              << "mpfr_near_boundary_enabled="
+              << (options.mpfr_near_boundary ? 1 : 0) << '\n';
+    if (options.mpfr_near_boundary) {
+        std::cout
+            << "mpfr_near_threshold_ulp=" << std::hexfloat << 0x1p-20
+            << std::defaultfloat << '\n'
+            << "mpfr_near_candidates=" << stats.mpfr_near_candidates << '\n'
+            << "mpfr_near_failures=" << stats.mpfr_near_failures << '\n'
+            << "mpfr_interval_ambiguous="
+            << stats.mpfr_interval_ambiguous << '\n'
+            << "zero_endpoint_analytic_checks="
+            << stats.zero_endpoint_analytic_checks << '\n'
+            << "unit_endpoint_analytic_checks="
+            << stats.unit_endpoint_analytic_checks << '\n'
+            << "near_candidates_total="
+            << (stats.mpfr_near_candidates
+                + stats.zero_endpoint_analytic_checks
+                + stats.unit_endpoint_analytic_checks) << '\n'
+            << "analytic_endpoint_failures="
+            << stats.analytic_endpoint_failures << '\n'
+            << "mpfr_max_precision=" << stats.mpfr_max_precision << '\n';
+    }
+    print_worst("normal", stats.normal_worst);
+    print_worst("subnormal", stats.subnormal_worst);
+    std::cout << "first_failure_present="
+              << (stats.first_failure.valid ? 1 : 0) << '\n';
+    if (stats.first_failure.valid) {
+        std::cout << "first_failure_input_bits=0x" << std::hex
+                  << std::setw(8) << std::setfill('0')
+                  << stats.first_failure.input << '\n'
+                  << "first_failure_output_bits=0x" << std::setw(8)
+                  << stats.first_failure.output << '\n'
+                  << "first_failure_lower_bits=0x" << std::setw(8)
+                  << stats.first_failure.lower << '\n'
+                  << "first_failure_upper_bits=0x" << std::setw(8)
+                  << stats.first_failure.upper << '\n'
+                  << std::dec << std::setfill(' ');
+    }
+    std::cout << "pass=" << (pass ? 1 : 0) << '\n';
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    const Options options = parse_options(argc, argv);
+    if (options.threads > 0) omp_set_num_threads(options.threads);
+    const int threads = omp_get_max_threads();
+    const std::uint64_t count = options.mode == Mode::full
+        ? (1ULL << 32)
+        : (64ULL << 23);
+
+    // Construct models and their independent contexts serially.  Each model
+    // is then evaluated by exactly one OpenMP worker.
+    std::vector<std::unique_ptr<VerilatedContext>> contexts;
+    std::vector<std::unique_ptr<VFP32Exp>> models;
+    contexts.reserve(static_cast<std::size_t>(threads));
+    models.reserve(static_cast<std::size_t>(threads));
+    for (int thread = 0; thread < threads; ++thread) {
+        contexts.push_back(std::make_unique<VerilatedContext>());
+        models.push_back(std::make_unique<VFP32Exp>(contexts.back().get()));
+    }
+
+    Stats total;
+#pragma omp parallel num_threads(threads)
+    {
+        const int thread = omp_get_thread_num();
+        Verilated::threadContextp(
+            contexts[static_cast<std::size_t>(thread)].get());
+        VFP32Exp& dut = *models[static_cast<std::size_t>(thread)];
+        Stats local;
+#pragma omp for schedule(static)
+        for (std::uint64_t index = 0; index < count; ++index) {
+            check_one(
+                dut,
+                input_for_index(options.mode, index),
+                options,
+                local);
+        }
+        dut.final();
+#pragma omp critical
+        merge_stats(total, local);
+    }
+
+    report(options, threads, total);
+    const bool pass = total.faithful_failures == 0
+                   && total.special_mismatches == 0
+                   && total.negative_outputs == 0
+                   && total.mpfr_near_failures == 0
+                   && total.analytic_endpoint_failures == 0
+                   && total.mpfr_interval_ambiguous == 0;
+    return pass ? 0 : 1;
 }
