@@ -7,6 +7,7 @@
 | ディレクトリ | 演算 | 形式 | 説明 |
 |---|---|---|---|
 | [`fp32_exp/`](fp32_exp/) | `exp(x)` | IEEE 754 binary32 | テーブルと二次近似を用いる組合せ回路 |
+| [`fp32_recip/`](fp32_recip/) | `1/x` | IEEE 754 binary32 | 区分一次初期値とNewton反復を用いるFTZ組合せ回路 |
 
 各演算ディレクトリは、直下に合成対象のRTL、`test/`に検証コード、
 `tools/`に実装固有の生成スクリプトを持ちます。詳細仕様とアルゴリズムは各ディレクトリの
@@ -29,6 +30,10 @@ make constants-check
 make lint-fp32_exp
 make test-fp32_exp
 make exhaustive-fp32_exp
+make lint-fp32_recip
+make test-fp32_recip
+make exhaustive-fp32_recip
+make monotonic-fp32_recip
 ```
 
 ## Dev container

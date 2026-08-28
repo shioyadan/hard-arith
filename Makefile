@@ -4,15 +4,17 @@
 SHELL := /bin/bash
 .SHELLFLAGS := -eu -o pipefail -c
 
-UNITS := fp32_exp
-CONSTANT_UNITS := fp32_exp
+UNITS := fp32_exp fp32_recip
+CONSTANT_UNITS := fp32_exp fp32_recip
 
 LINT_TARGETS := $(addprefix lint-,$(UNITS))
 TEST_TARGETS := $(addprefix test-,$(UNITS))
 CLEAN_TARGETS := $(addprefix clean-,$(UNITS))
 CONSTANT_CHECK_TARGETS := $(addprefix constants-check-,$(CONSTANT_UNITS))
+EXHAUSTIVE_TARGETS := $(addprefix exhaustive-,$(UNITS))
+MONOTONIC_TARGETS := $(addprefix monotonic-,$(UNITS))
 
-.PHONY: all lint test exhaustive clean constants-check
+.PHONY: all lint test exhaustive monotonic clean constants-check
 
 all: test
 
@@ -20,7 +22,9 @@ lint: $(LINT_TARGETS)
 
 test: $(TEST_TARGETS)
 
-exhaustive: exhaustive-fp32_exp
+exhaustive: $(EXHAUSTIVE_TARGETS)
+
+monotonic: $(MONOTONIC_TARGETS)
 
 clean: $(CLEAN_TARGETS)
 
@@ -34,6 +38,9 @@ test-%:
 
 exhaustive-%:
 	$(MAKE) -C $* exhaustive
+
+monotonic-%:
+	$(MAKE) -C $* monotonic
 
 clean-%:
 	$(MAKE) -C $* clean
