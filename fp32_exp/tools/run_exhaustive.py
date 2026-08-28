@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright 2026 Ryota Shioya
+# Copyright 2026 Ryota Shioya and Toru Koizumi
 # SPDX-License-Identifier: Apache-2.0
 
 """FP32 expの全数検査を分割実行し、精度と単調性を集計する。"""

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright 2026 Ryota Shioya
+# Copyright 2026 Ryota Shioya and Toru Koizumi
 # SPDX-License-Identifier: Apache-2.0
 
 """32区間のcentered Q14初期値を厳密整数演算で再生成・照合する。"""

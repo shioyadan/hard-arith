@@ -1,4 +1,4 @@
-// Copyright 2026 Ryota Shioya
+// Copyright 2026 Ryota Shioya and Toru Koizumi
 // SPDX-License-Identifier: Apache-2.0
 
 #include <algorithm>

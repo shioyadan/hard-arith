@@ -1,4 +1,4 @@
-// Copyright 2026 Ryota Shioya
+// Copyright 2026 Ryota Shioya and Toru Koizumi
 // SPDX-License-Identifier: Apache-2.0
 
 // IEEE 754 binary32 の逆数 1/x を求める組合せ回路。

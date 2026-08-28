@@ -461,6 +461,6 @@ subnormal出力packを追加すると最終丸めの誤差配分が変わるた�
 
 ## ライセンス
 
-Copyright 2026 Ryota Shioya
+Copyright 2026 Ryota Shioya and Toru Koizumi
 
 Apache License 2.0の下で公開します。詳細は[`../LICENSE`](../LICENSE)を参照してください。
