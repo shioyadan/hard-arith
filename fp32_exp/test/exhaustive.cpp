@@ -18,8 +18,23 @@
 #include "VFP32Exp.h"
 #include "verilated.h"
 
+#ifndef FP32_EXP_ACTIVE_EXPONENT_COUNT
+#define FP32_EXP_ACTIVE_EXPONENT_COUNT 32u
+#endif
+
+#ifndef FP32_EXP_STD_FUNCTION
+#define FP32_EXP_STD_FUNCTION std::exp
+#endif
+
+#ifndef FP32_EXP_ORACLE_NAME
+#define FP32_EXP_ORACLE_NAME "std::exp"
+#endif
+
 #ifdef FP32_EXP_USE_MPFR
 #include <mpfr.h>
+#ifndef FP32_EXP_MPFR_FUNCTION
+#define FP32_EXP_MPFR_FUNCTION mpfr_exp
+#endif
 #endif
 
 namespace {
@@ -184,8 +199,8 @@ std::uint32_t input_for_index(Mode mode, std::uint64_t index) {
     const std::uint32_t slot = static_cast<std::uint32_t>(index >> 23);
     const std::uint32_t fraction = static_cast<std::uint32_t>(index)
                                  & 0x007fffffu;
-    return ((slot >> 5) << 31)
-         | ((102u + (slot & 31u)) << 23)
+    return ((slot / FP32_EXP_ACTIVE_EXPONENT_COUNT) << 31)
+         | ((102u + (slot % FP32_EXP_ACTIVE_EXPONENT_COUNT)) << 23)
          | fraction;
 }
 
@@ -255,8 +270,8 @@ void audit_near_boundary(
         mpfr_init2(lower_bound, precision);
         mpfr_init2(upper_bound, precision);
         mpfr_set_flt(argument, input, MPFR_RNDN);
-        mpfr_exp(lower_bound, argument, MPFR_RNDD);
-        mpfr_exp(upper_bound, argument, MPFR_RNDU);
+        FP32_EXP_MPFR_FUNCTION(lower_bound, argument, MPFR_RNDD);
+        FP32_EXP_MPFR_FUNCTION(upper_bound, argument, MPFR_RNDU);
 
         const std::uint32_t lower_from_lower = std::bit_cast<std::uint32_t>(
             mpfr_get_flt(lower_bound, MPFR_RNDD));
@@ -330,7 +345,7 @@ void check_one(
 
     ++stats.finite_checks;
     const float input = std::bit_cast<float>(input_bits);
-    const double exact = std::exp(static_cast<double>(input));
+    const double exact = FP32_EXP_STD_FUNCTION(static_cast<double>(input));
 
     std::uint32_t rounded_bits = 0;
     std::uint32_t lower = 0;
@@ -487,7 +502,8 @@ void report(const Options& options, int threads, const Stats& stats) {
                    && stats.mpfr_near_failures == 0
                    && stats.analytic_endpoint_failures == 0
                    && stats.mpfr_interval_ambiguous == 0;
-    std::cout << "oracle=std::exp(binary64); near-grid cases checked with optional MPFR; not a formal proof\n"
+    std::cout << "oracle=" FP32_EXP_ORACLE_NAME
+                 "(binary64); near-grid cases checked with optional MPFR; not a formal proof\n"
               << "mode=" << (options.mode == Mode::full ? "full" : "active")
               << '\n'
               << "threads=" << threads << '\n'
@@ -556,7 +572,7 @@ int main(int argc, char** argv) {
     const int threads = omp_get_max_threads();
     const std::uint64_t count = options.mode == Mode::full
         ? (1ULL << 32)
-        : (64ULL << 23);
+        : (2ULL * FP32_EXP_ACTIVE_EXPONENT_COUNT << 23);
 
     // Construct models and their independent contexts serially.  Each model
     // is then evaluated by exactly one OpenMP worker.
