@@ -116,6 +116,20 @@ uint64_t fp32_sincospi_faithful_bounds(uint32_t input, uint32_t select_cos)
     return ((uint64_t)upper << 32) | lower;
 }
 
+double fp32_sincospi_abs_error_units(uint32_t input, uint32_t select_cos,
+                                     uint32_t actual_bits)
+{
+    uint32_t exact_bits;
+    __float128 exact = fp32_sincospi_exact(input, select_cos, &exact_bits);
+    __float128 actual;
+
+    if (exact_bits != UINT32_C(0xffffffff))
+        return actual_bits == exact_bits ? 0.0 : INFINITY;
+
+    actual = (__float128)bits_to_float(actual_bits);
+    return (double)(fabsq(actual-exact)*8388608.0Q);
+}
+
 #ifdef __cplusplus
 }
 #endif

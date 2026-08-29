@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""FP32SinCosPiの近似係数と小入力補正tableを生成・照合する。"""
+"""FP32SinCosPiとLite版の近似係数tableを生成・照合する。"""
 
 from __future__ import annotations
 
 import argparse
+import math
 import re
+import struct
 from pathlib import Path
 
 import mpmath as mp
@@ -21,6 +23,13 @@ SMALL_MIN_EXPONENT = -14
 SMALL_INTERVALS = 16
 BEGIN_MARKER = "// BEGIN GENERATED SINCOSPI TABLES"
 END_MARKER = "// END GENERATED SINCOSPI TABLES"
+LITE_A_FRACTION_BITS = 24
+LITE_B_FRACTION_BITS = 15
+LITE_C_FRACTION_BITS = 5
+LITE_PHASE_FRACTION_BITS = 23
+LITE_TABLE_SIZE = 64
+LITE_BEGIN_MARKER = "// BEGIN GENERATED SINCOSPI LITE TABLES"
+LITE_END_MARKER = "// END GENERATED SINCOSPI LITE TABLES"
 
 
 def round_nearest(value: mp.mpf) -> int:
@@ -139,9 +148,102 @@ def generate_block() -> str:
     return "\n".join(lines)
 
 
-def replace_block(text: str, block: str) -> str:
+def round_signed_shift(value: int, shift: int) -> int:
+    magnitude = abs(value)
+    rounded = (magnitude+(1 << (shift-1))) >> shift
+    return -rounded if value < 0 else rounded
+
+
+def float32(value: float) -> float:
+    return struct.unpack("f", struct.pack("f", value))[0]
+
+
+def tune_lite_coefficients() -> list[tuple[int, int, int, int]]:
+    """量子化後のHorner演算を含め、各区間の最大絶対誤差を抑える。"""
+    phase_fraction = LITE_PHASE_FRACTION_BITS
+    interval_shift = phase_fraction-7
+    half_width = 2.0**-8
+    adjusted_slope = math.pi-math.pi**3*half_width**2/8.0
+    shift_c_to_b = phase_fraction+LITE_C_FRACTION_BITS-LITE_B_FRACTION_BITS
+    shift_b_to_a = phase_fraction+LITE_B_FRACTION_BITS-LITE_A_FRACTION_BITS
+    rows: list[tuple[int, int, int, int]] = []
+
+    for index in range(LITE_TABLE_SIZE):
+        center = (index+0.5)/128.0
+        initial_a = round(math.sin(math.pi*center)*(1 << LITE_A_FRACTION_BITS))
+        initial_b = round(
+            adjusted_slope*math.cos(math.pi*center)*(1 << LITE_B_FRACTION_BITS)
+        )
+        initial_c = round(
+            -math.pi**2*math.sin(math.pi*center)/2
+            * (1 << LITE_C_FRACTION_BITS)
+        )
+
+        begin = index << interval_shift
+        span = (1 << interval_shift)-1
+        phases = sorted({begin+(span*sample)//128 for sample in range(129)})
+        if index == 0:
+            phases = [phase for phase in phases if phase != 0]
+        best_error = math.inf
+        best = (initial_a, initial_b, initial_c)
+        for offset_a in range(-2, 3):
+            coefficient_a = initial_a+offset_a
+            for offset_b in range(-2, 3):
+                coefficient_b = initial_b+offset_b
+                for offset_c in range(-2, 3):
+                    coefficient_c = initial_c+offset_c
+                    maximum = 0.0
+                    for phase in phases:
+                        delta = phase-begin-(1 << (interval_shift-1))
+                        c_term = round_signed_shift(
+                            delta*coefficient_c, shift_c_to_b
+                        )
+                        correction = round_signed_shift(
+                            delta*(coefficient_b+c_term), shift_b_to_a
+                        )
+                        output = float32(
+                            (coefficient_a+correction)
+                            * 2.0**-LITE_A_FRACTION_BITS
+                        )
+                        low = (phase-0.5)*2.0**-phase_fraction
+                        high = (phase+0.5)*2.0**-phase_fraction
+                        maximum = max(
+                            maximum,
+                            abs(output-math.sin(math.pi*low)),
+                            abs(output-math.sin(math.pi*high)),
+                        )
+                    if maximum < best_error:
+                        best_error = maximum
+                        best = (coefficient_a, coefficient_b, coefficient_c)
+        rows.append((index, *best))
+    return rows
+
+
+def generate_lite_block() -> str:
+    rows = tune_lite_coefficients()
+
+    lines = [LITE_BEGIN_MARKER]
+    lines.extend(table_array(
+        "coefficient_a_table_q24", 25,
+        [(f"j = {index}", a) for index, a, _, _ in rows], False,
+    ))
+    lines.append("")
+    lines.extend(table_array(
+        "coefficient_b_table_q15", 17,
+        [(f"j = {index}", b) for index, _, b, _ in rows], False,
+    ))
+    lines.append("")
+    lines.extend(table_array(
+        "coefficient_c_table_q5", 9,
+        [(f"j = {index}", c) for index, _, _, c in rows], True,
+    ))
+    lines.append(LITE_END_MARKER)
+    return "\n".join(lines)
+
+
+def replace_block(text: str, begin_marker: str, end_marker: str, block: str) -> str:
     pattern = re.compile(
-        rf"^{re.escape(BEGIN_MARKER)}$.*?^{re.escape(END_MARKER)}$",
+        rf"^{re.escape(begin_marker)}$.*?^{re.escape(end_marker)}$",
         re.MULTILINE | re.DOTALL,
     )
     if pattern.search(text) is None:
@@ -159,7 +261,17 @@ def main() -> None:
     path = args.update or args.check
     assert path is not None
     original = path.read_text()
-    expected = replace_block(original, generate_block())
+    if BEGIN_MARKER in original:
+        expected = replace_block(original, BEGIN_MARKER, END_MARKER, generate_block())
+    elif LITE_BEGIN_MARKER in original:
+        expected = replace_block(
+            original,
+            LITE_BEGIN_MARKER,
+            LITE_END_MARKER,
+            generate_lite_block(),
+        )
+    else:
+        raise SystemExit("RTLに生成table markerがありません")
     if args.check is not None:
         if original != expected:
             raise SystemExit(f"再生成したsincospi定数がRTLと一致しません: {path}")
