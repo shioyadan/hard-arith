@@ -7,6 +7,7 @@
 | ディレクトリ | 演算 | 形式 | 説明 |
 |---|---|---|---|
 | [`fp32_exp/`](fp32_exp/) | `exp(x)` | IEEE 754 binary32 | テーブルと二次近似を用いる組合せ回路 |
+| [`fp32_exp2/`](fp32_exp2/) | `2^x` | IEEE 754 binary32 | 1/64引数還元、テーブル、二次近似を用いる組合せ回路 |
 | [`fp32_recip/`](fp32_recip/) | `1/x` | IEEE 754 binary32 | 区分一次初期値とNewton反復を用いるFTZ組合せ回路 |
 | [`fp32_log2/`](fp32_log2/) | `log2(x)` | IEEE 754 binary32 | mixed-precision三次近似を用いる組合せ回路 |
 | [`fp32_rsqrt/`](fp32_rsqrt/) | `1/sqrt(x)` | IEEE 754 binary32 | 指数偶奇別の区分一次初期値とNewton反復を用いるFTZ組合せ回路 |
@@ -32,6 +33,11 @@ make constants-check
 make lint-fp32_exp
 make test-fp32_exp
 make exhaustive-fp32_exp
+make lint-fp32_exp2
+make test-fp32_exp2
+make exhaustive-active-fp32_exp2
+make exhaustive-fp32_exp2
+make monotonic-fp32_exp2
 make lint-fp32_recip
 make test-fp32_recip
 make exhaustive-fp32_recip
