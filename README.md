@@ -10,6 +10,7 @@
 | [`fp32_recip/`](fp32_recip/) | `1/x` | IEEE 754 binary32 | 区分一次初期値とNewton反復を用いるFTZ組合せ回路 |
 | [`fp32_log2/`](fp32_log2/) | `log2(x)` | IEEE 754 binary32 | mixed-precision三次近似を用いる組合せ回路 |
 | [`fp32_rsqrt/`](fp32_rsqrt/) | `1/sqrt(x)` | IEEE 754 binary32 | 指数偶奇別の区分一次初期値とNewton反復を用いるFTZ組合せ回路 |
+| [`fp32_sincospi/`](fp32_sincospi/) | `sin(pi*x)` / `cos(pi*x)` | IEEE 754 binary32 | 実行時選択、共通位相縮約、三次近似を用いる組合せ回路 |
 
 各演算ディレクトリは、直下に合成対象のRTL、`test/`に検証コード、
 `tools/`に実装固有の生成スクリプトを持ちます。詳細仕様とアルゴリズムは各ディレクトリの
@@ -43,6 +44,9 @@ make lint-fp32_rsqrt
 make test-fp32_rsqrt
 make exhaustive-fp32_rsqrt
 make monotonic-fp32_rsqrt
+make lint-fp32_sincospi
+make test-fp32_sincospi
+make exhaustive-fp32_sincospi
 ```
 
 ## Dev container
