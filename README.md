@@ -8,6 +8,7 @@
 |---|---|---|---|
 | [`fp32_exp/`](fp32_exp/) | `exp(x)` | IEEE 754 binary32 | テーブルと二次近似を用いる組合せ回路 |
 | [`fp32_recip/`](fp32_recip/) | `1/x` | IEEE 754 binary32 | 区分一次初期値とNewton反復を用いるFTZ組合せ回路 |
+| [`fp32_log2/`](fp32_log2/) | `log2(x)` | IEEE 754 binary32 | mixed-precision三次近似を用いる組合せ回路 |
 | [`fp32_rsqrt/`](fp32_rsqrt/) | `1/sqrt(x)` | IEEE 754 binary32 | 指数偶奇別の区分一次初期値とNewton反復を用いるFTZ組合せ回路 |
 
 各演算ディレクトリは、直下に合成対象のRTL、`test/`に検証コード、
@@ -35,6 +36,9 @@ make lint-fp32_recip
 make test-fp32_recip
 make exhaustive-fp32_recip
 make monotonic-fp32_recip
+make lint-fp32_log2
+make test-fp32_log2
+make exhaustive-fp32_log2
 make lint-fp32_rsqrt
 make test-fp32_rsqrt
 make exhaustive-fp32_rsqrt

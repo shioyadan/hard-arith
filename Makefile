@@ -4,8 +4,8 @@
 SHELL := /bin/bash
 .SHELLFLAGS := -eu -o pipefail -c
 
-UNITS := fp32_exp fp32_recip fp32_rsqrt
-CONSTANT_UNITS := fp32_exp fp32_recip fp32_rsqrt
+UNITS := fp32_exp fp32_recip fp32_rsqrt fp32_log2
+CONSTANT_UNITS := fp32_exp fp32_recip fp32_rsqrt fp32_log2
 
 LINT_TARGETS := $(addprefix lint-,$(UNITS))
 TEST_TARGETS := $(addprefix test-,$(UNITS))
