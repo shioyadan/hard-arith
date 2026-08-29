@@ -1,12 +1,12 @@
 # FP32 Log2
 
 IEEE 754 binary32のbit patternを入力し、底2の対数`log2(x)`を返す、合成可能な
-SystemVerilog組合せ回路です。公開トップモジュールは`FP32Log2`です。
+SystemVerilog組合せ回路です。精度とsubnormal対応が異なる二つの公開トップがあります。
 
 - clockなしの32-bit入出力
-- 正のsubnormal入力に対応
-- 正の有限入力に対してfaithful rounding
-- 正の入力領域で単調非減少
+- `FP32Log2`: 正のsubnormal入力に対応し、正の有限入力に対してfaithful rounding
+- `FP32Log2Lite`: 入力subnormalをFTZとし、複合演算器向けの緩い誤差条件で小面積化
+- どちらも正の入力領域で単調非減少
 
 ## インターフェース
 
@@ -15,23 +15,33 @@ module FP32Log2 (
     input  wire [31:0] x,
     output wire [31:0] result
 );
+
+module FP32Log2Lite (
+    input  wire [31:0] x,
+    output wire [31:0] result
+);
 ```
 
 ## 数値仕様
 
-| 入力または条件 | 出力 |
-|---|---|
-| NaN | canonical quiet NaN `0x7fc00000` |
-| 負の非零値、`-Inf` | canonical quiet NaN `0x7fc00000` |
-| `+0`、`-0` | `-Inf` |
-| `+Inf` | `+Inf` |
-| 正の有限値 | `log2(x)`のfaithful値 |
-| 正の2の累乗 | 対応する整数を正確に返す |
+| 入力または条件 | `FP32Log2` | `FP32Log2Lite` |
+|---|---|---|
+| NaN | canonical quiet NaN `0x7fc00000` | 同左 |
+| 負の非零値、`-Inf` | canonical quiet NaN `0x7fc00000` | 同左 |
+| `+0`、`-0` | `-Inf` | `-Inf` |
+| `+Inf` | `+Inf` | `+Inf` |
+| 正のsubnormal | 数学的な`log2(x)`のfaithful値 | FTZとして`-Inf` |
+| 正のnormal | `log2(x)`のfaithful値 | RNEから2 ULP以内、または絶対誤差`4*2^-23`以内 |
+| 正の2の累乗 | 対応する整数を正確に返す | 同左 |
 
 faithful roundingは、無限精度の結果を挟む直下・直上のbinary32値のどちらかを返すことを
 意味します。correct roundingを要求する仕様ではありません。
 
-## アルゴリズム
+Liteの誤差条件は、DesignWareの複合演算器`DW_lp_fp_multifunc`におけるlog2の
+数値誤差条件を比較目標にしたものです。負入力などの特殊値規約までvendor IPと一致させる
+仕様ではありません。
+
+## `FP32Log2`のアルゴリズム
 
 ### 全体の構造
 
@@ -152,15 +162,63 @@ Q34へ早く丸めると相対精度を失うため、最後の補正積をQ51�
 
 特殊値は近似経路へ入る前に判定し、数値仕様の表に従って出力します。
 
+## `FP32Log2Lite`のアルゴリズム
+
+### 全体の構造
+
+正のnormal入力を`x=2^E*M, 1 <= M < 2`へ分けると、実際に近似する必要があるのは
+仮数部分だけです。
+
+```text
+log2(x) = E+log2(M)
+```
+
+`E`は整数のままQ22へ移し、`log2(M)`だけを64区間の二次式で求めます。
+
+```text
+1. 仮数上位6 bitをtable indexにする
+2. 仮数下位17 bitを区間中心からのsigned残差rにする
+3. log2(M) ~= C0[i]+r*(C1[i]+r*C2[i])
+4. Eを加えたsigned Q22値をbinary32へround-to-nearest-evenでpackする
+```
+
+indexは仮数のbit sliceだけで作れるため、中心探索や境界比較器は不要です。三次式や
+reciprocalによる範囲縮小も使わず、可変乗算を二つに抑えます。
+
+### 区分二次近似
+
+区間`i`の中心を`c=1+(i+0.5)/64`とし、区間内位置を
+`t=r/2^17`とすると、`M=c+t/64`です。中心まわりの二次Taylor係数を出発点にし、
+固定小数点での切り捨てを含む全`2^17`入力を区間ごとに検査して係数を数LSBだけ調整します。
+
+```text
+C0 ~= log2(c)
+C1 ~= 1/(64*c*ln(2))
+C2 ~= -1/(2*64^2*c^2*ln(2))
+```
+
+係数とHorner和はすべて`2^-22`単位です。`C0/C1/C2`の実格納幅は
+22/18/11 bitで、64行tableは合計3,264 bitです。残差はsigned 17 bit、
+二つの積は`17x11` bitと`17x18` bitです。
+
+`M=1`では真値がzeroなので、table近似を通さず整数項を直接返します。これにより、
+zero近傍の絶対誤差仕様とは別に、正の2の累乗をexactにします。Q22の絶対刻みは
+`2^-22=2*2^-23`であり、Liteの絶対誤差上限へ合わせた幅です。
+
+係数調整後は`x in [0.5,2)`の全16,777,216入力で誤差条件と単調性を検査します。
+これは全`2^32` bit patternの列挙や形式証明ではありません。
+
 ## ファイル
 
 | ファイル | 内容 |
 |---|---|
 | `fp32_log2.sv` | RTL、table、公開トップ`FP32Log2` |
+| `fp32_log2_lite.sv` | 64区間二次RTL、公開トップ`FP32Log2Lite` |
 | `tools/gen_constants.py` | tableと係数の生成・照合 |
-| `test/tb_fp32_log2.sv` | directed、random、単調性試験 |
-| `test/exhaustive.cpp` | 中心区間と正のsubnormalの全数検査 |
-| `test/reference.c` | binary128参照値とfaithful境界 |
+| `tools/gen_lite_constants.py` | Lite係数の生成・照合 |
+| `test/tb_fp32_log2*.sv` | directed、random、単調性試験 |
+| `test/exhaustive*.cpp` | 各仕様で重要な入力領域の全数検査 |
+| `test/reference.c` | binary128参照値、faithful境界、Lite絶対誤差 |
 
 ## 検証
 
@@ -172,5 +230,6 @@ make constants-check
 ```
 
 `test`は特殊値、正規化境界、table境界、指数境界、固定seed乱数、単調性を検査します。
-`exhaustive`は、出力ULPが最も細かくなる`q=0`の中心区間8,388,608入力と、正の
-subnormal全8,388,607入力を検査します。これは全`2^32` bit patternの列挙や形式証明ではありません。
+`exhaustive`は、`FP32Log2`について出力ULPが最も細かくなる`q=0`の中心区間と
+正のsubnormal、`FP32Log2Lite`について`x in [0.5,2)`の全16,777,216入力を検査します。
+個別には`make test-lite`、`make exhaustive-lite`も使用できます。

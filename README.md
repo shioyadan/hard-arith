@@ -15,7 +15,7 @@
 | [`fp32_exp/`](fp32_exp/) | `exp(x)` | 全出力範囲でfaithful | gradual underflow出力に対応 | 非NaN領域で単調非減少 |
 | [`fp32_exp2/`](fp32_exp2/) | `2^x` | 全出力範囲でfaithful | gradual underflow出力に対応 | 非NaN領域で単調非減少 |
 | [`fp32_recip/`](fp32_recip/) | `1/x` | 結果がnormalとなる範囲でfaithful | 入出力ともFTZ | 負領域・正領域ごとに単調非増加 |
-| [`fp32_log2/`](fp32_log2/) | `log2(x)` | 正の有限入力でfaithful | 正のsubnormal入力に対応 | 正の入力領域で単調非減少 |
+| [`fp32_log2/`](fp32_log2/) | `log2(x)` | faithful版とLite誤差版を収録 | faithful版は対応、Lite版は入力FTZ | 正の入力領域で単調非減少 |
 | [`fp32_rsqrt/`](fp32_rsqrt/) | `1/sqrt(x)` | 正のnormal入力でfaithful | subnormal入力はFTZ | `+0`から`+Inf`まで単調非増加 |
 | [`fp32_sqrt/`](fp32_sqrt/) | `sqrt(x)` | 正のnormal入力でfaithful | subnormal入力はFTZ | `+0`から`+Inf`まで単調非減少 |
 
@@ -56,6 +56,9 @@ make monotonic-fp32_recip
 make lint-fp32_log2
 make test-fp32_log2
 make exhaustive-fp32_log2
+make lint-fp32_log2_lite
+make test-fp32_log2_lite
+make exhaustive-fp32_log2_lite
 make lint-fp32_rsqrt
 make test-fp32_rsqrt
 make exhaustive-fp32_rsqrt

@@ -16,7 +16,8 @@ EXHAUSTIVE_ACTIVE_UNITS := fp32_exp fp32_exp2
 EXHAUSTIVE_ACTIVE_TARGETS := $(addprefix exhaustive-active-,$(EXHAUSTIVE_ACTIVE_UNITS))
 MONOTONIC_TARGETS := $(addprefix monotonic-,$(UNITS))
 
-.PHONY: all lint test exhaustive exhaustive-active monotonic clean constants-check
+.PHONY: all lint test exhaustive exhaustive-active monotonic clean constants-check \
+	lint-fp32_log2_lite test-fp32_log2_lite exhaustive-fp32_log2_lite
 
 all: test
 
@@ -54,3 +55,12 @@ clean-%:
 
 constants-check-%:
 	$(MAKE) -C $* constants-check
+
+lint-fp32_log2_lite:
+	$(MAKE) -C fp32_log2 lint-lite
+
+test-fp32_log2_lite:
+	$(MAKE) -C fp32_log2 test-lite
+
+exhaustive-fp32_log2_lite:
+	$(MAKE) -C fp32_log2 exhaustive-lite

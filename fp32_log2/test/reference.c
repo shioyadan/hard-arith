@@ -75,6 +75,37 @@ uint64_t fp32_log2_faithful_bounds(uint32_t input)
     return ((uint64_t)upper << 32) | lower;
 }
 
+uint32_t fp32_log2_lite_ref(uint32_t input)
+{
+    uint32_t exponent = input & UINT32_C(0x7f800000);
+    uint32_t fraction = input & UINT32_C(0x007fffff);
+
+    if (exponent == UINT32_C(0x7f800000)) {
+        if (fraction != 0 || (input >> 31) != 0)
+            return UINT32_C(0x7fc00000);
+        return UINT32_C(0x7f800000);
+    }
+    if (exponent == 0)
+        return UINT32_C(0xff800000);
+    if ((input >> 31) != 0)
+        return UINT32_C(0x7fc00000);
+    return float_to_bits((float)log2q((__float128)bits_to_float(input)));
+}
+
+double fp32_log2_lite_abs_error_units(uint32_t input, uint32_t actual_bits)
+{
+    uint32_t exponent = input & UINT32_C(0x7f800000);
+    __float128 exact;
+    __float128 actual;
+
+    if (exponent == 0 || exponent == UINT32_C(0x7f800000)
+            || (input >> 31) != 0)
+        return 0.0;
+    exact = log2q((__float128)bits_to_float(input));
+    actual = (__float128)bits_to_float(actual_bits);
+    return (double)(fabsq(actual-exact)*8388608.0Q);
+}
+
 #ifdef __cplusplus
 }
 #endif
