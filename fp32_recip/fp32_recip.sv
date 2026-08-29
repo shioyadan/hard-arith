@@ -21,75 +21,77 @@ module FP32Recip(x, result);
 
     // 各区間で初期相対誤差が正負に釣り合うように調整したQ14切片。
     // 連続minimax直線をQ14へ量子化した後、全仮数で初期誤差を最小化している。
-    localparam logic[13:0] reciprocal_intercept_q14 [0:31] = '{
-        14'h3ffd,
-        14'h3e0e,
-        14'h3c3a,
-        14'h3a82,
-        14'h38e2,
-        14'h3758,
-        14'h35e3,
-        14'h3482,
-        14'h3332,
-        14'h31f2,
-        14'h30c2,
-        14'h2fa0,
-        14'h2e8a,
-        14'h2d82,
-        14'h2c84,
-        14'h2b92,
-        14'h2aa9,
-        14'h29cb,
-        14'h28f5,
-        14'h2827,
-        14'h2761,
-        14'h26a4,
-        14'h25ec,
-        14'h253c,
-        14'h2491,
-        14'h23ed,
-        14'h234f,
-        14'h22b5,
-        14'h2222,
-        14'h2192,
-        14'h2107,
-        14'h2081
+    // 全切片で共通するMSB=1を省き、下位13 bitだけを格納する。
+    localparam logic[12:0] reciprocal_intercept_low_q14 [0:31] = '{
+        13'h1ffd,
+        13'h1e0e,
+        13'h1c3a,
+        13'h1a82,
+        13'h18e1,
+        13'h1758,
+        13'h15e3,
+        13'h1482,
+        13'h1332,
+        13'h11f2,
+        13'h10c3,
+        13'h0f9f,
+        13'h0e8a,
+        13'h0d82,
+        13'h0c84,
+        13'h0b92,
+        13'h0aa9,
+        13'h09cb,
+        13'h08f5,
+        13'h0827,
+        13'h0761,
+        13'h06a4,
+        13'h05ec,
+        13'h053c,
+        13'h0491,
+        13'h03ed,
+        13'h034f,
+        13'h02b5,
+        13'h0222,
+        13'h0192,
+        13'h0107,
+        13'h0081
     };
 
-    // Q14切片差の下位1 bitを省いたQ13傾き。
-    localparam logic[7:0] reciprocal_delta_q13 [0:31] = '{
-        8'hf8,
-        8'hea,
-        8'hdc,
-        8'hd0,
-        8'hc5,
-        8'hba,
-        8'hb1,
-        8'ha8,
-        8'ha0,
-        8'h98,
-        8'h91,
-        8'h8b,
-        8'h84,
-        8'h7f,
-        8'h79,
-        8'h74,
-        8'h6f,
-        8'h6b,
-        8'h67,
-        8'h63,
-        8'h5f,
-        8'h5c,
-        8'h58,
-        8'h55,
-        8'h52,
-        8'h4f,
-        8'h4d,
-        8'h4a,
-        8'h48,
-        8'h45,
-        8'h43,
-        8'h41
+    // 傾きの約4倍の値域を二つのscaleへ分け、7 bitで格納する。
+    // 区間0..12ではQ12、区間13..31ではQ13として解釈する。
+    localparam logic[6:0] reciprocal_delta_scaled [0:31] = '{
+        7'h7c,
+        7'h75,
+        7'h6e,
+        7'h68,
+        7'h62,
+        7'h5d,
+        7'h58,
+        7'h54,
+        7'h50,
+        7'h4c,
+        7'h49,
+        7'h45,
+        7'h42,
+        7'h7f,
+        7'h79,
+        7'h74,
+        7'h6f,
+        7'h6b,
+        7'h67,
+        7'h63,
+        7'h5f,
+        7'h5c,
+        7'h58,
+        7'h55,
+        7'h52,
+        7'h4f,
+        7'h4d,
+        7'h4a,
+        7'h48,
+        7'h45,
+        7'h43,
+        7'h41
     };
 
     // 入力の分解。normal入力では x_sig は unsigned Q23 の [1,2) である。
@@ -98,15 +100,21 @@ module FP32Recip(x, result);
     wire [22:0] x_mant = x[22:0];
     wire [23:0] x_sig  = { 1'b1, x_mant };
     wire [4:0]  interval = x_mant[22:18];
-    wire [10:0] residual = x_mant[17:7];
+    wire [9:0]  residual = x_mant[17:8];
 
-    // Q13 delta * 11-bit residual / 2^10をQ14補間量にする。
-    // 区間内位置の下位7 bitは使わない。
-    wire [18:0] interpolation_product =
-        reciprocal_delta_q13[interval] * residual;
-    wire [8:0] interpolation = interpolation_product[18:10];
-    wire [13:0] reciprocal_seed =
-        reciprocal_intercept_q14[interval] - { 5'b0, interpolation };
+    // 7x10 bit補間積をbankごとのscaleでQ14減算量へ戻す。
+    // 区間内位置の下位8 bitは使わない。
+    wire [16:0] interpolation_product =
+        reciprocal_delta_scaled[interval] * residual;
+    wire delta_q12_bank = interval <= 5'd12;
+    wire [8:0] interpolation = delta_q12_bank
+                             ? interpolation_product[16:8]
+                             : { 1'b0, interpolation_product[16:9] };
+
+    // 全seedのMSBも1なので、下位13 bitの減算後にMSBを復元する。
+    wire [12:0] reciprocal_seed_low =
+        reciprocal_intercept_low_q14[interval] - { 4'b0, interpolation };
+    wire [13:0] reciprocal_seed = { 1'b1, reciprocal_seed_low };
 
     // m*y0-1はsigned 26 bitに収まる。Q37の1.0は2^37であり、mod 2^26では
     // 0になるため、24x14積の下位26 bitが差を取った後の二の補数残差と一致する。
@@ -124,8 +132,8 @@ module FP32Recip(x, result);
         correction_seed_signed * error_high;
     wire signed [15:0] correction = correction_product[27:12];
 
-    // 最後の+4はQ23へ落とす際の0.5 ULPに相当する。全仮数の整数解析では
-    // +3から+4までがfaithfulであり、RNE一致数の多い+4を使う。
+    // 最後の+4はQ23へ落とす際の0.5 ULPに相当する。全仮数の整数解析で
+    // faithfulとなる共通biasは+4だけである。
     wire signed [27:0] reciprocal_q27 =
         $signed({ 1'b0, reciprocal_seed, 13'b0 })
         - $signed({ { 12{correction[15]} }, correction })
@@ -136,23 +144,28 @@ module FP32Recip(x, result);
 
     // m=1では2/mが2.0となるため、指数を一つ上げて仮数1.0を直接返す。
     // m>1では2/mが[1,2)なので通常のhidden bit位置へ収まる。
-    wire [7:0] power_expo      = 8'd254 - x_expo;
-    wire [7:0] reciprocal_expo = 8'd253 - x_expo;
-    wire [30:0] finite_payload = x_mant == 0
-                               ? { power_expo, 23'b0 }
-                               : { reciprocal_expo, reciprocal_sig[22:0] };
+    // 二つの定数減算を、仮数zeroをcarry-inとする一つの指数演算へまとめる。
+    wire x_mant_zero = ~|x_mant;
+    wire [7:0] finite_expo =
+        8'd253 - x_expo + { 7'b0, x_mant_zero };
+    wire [30:0] finite_payload = {
+        finite_expo,
+        x_mant_zero ? 23'b0 : reciprocal_sig[22:0]
+    };
 
     // FTZ仕様。normal入力の逆数がsubnormalになるのは、指数254の全入力と、
     // 指数253で仮数が1.0より大きい入力である。指数253・仮数0は最小normalを返す。
-    wire x_is_nan = x_expo == 8'hff & x_mant != 0;
-    wire x_is_inf = x_expo == 8'hff & x_mant == 0;
-    wire x_is_zero_or_subnormal = x_expo == 0;
+    // exponentとmantissaのzero/全1判定を特殊値decode全体で共有する。
+    wire x_expo_all_one = &x_expo;
+    wire x_expo_zero = ~|x_expo;
+    wire x_is_nan = x_expo_all_one & ~x_mant_zero;
+    wire x_is_inf = x_expo_all_one & x_mant_zero;
     wire result_is_ftz = x_expo == 8'd254
-                       | (x_expo == 8'd253 & x_mant != 0);
-
-    assign result = x_is_nan               ? qnan :
-                    x_is_inf               ? { x_sign, zero_payload } :
-                    x_is_zero_or_subnormal ? { x_sign, inf_payload } :
-                    result_is_ftz           ? { x_sign, zero_payload } :
-                                              { x_sign, finite_payload };
+                       | (x_expo == 8'd253 & ~x_mant_zero);
+    wire [30:0] result_payload = x_is_nan      ? qnan[30:0] :
+                                 x_is_inf      ? zero_payload :
+                                 x_expo_zero   ? inf_payload :
+                                 result_is_ftz ? zero_payload : finite_payload;
+    wire result_sign = x_is_nan ? 1'b0 : x_sign;
+    assign result = { result_sign, result_payload };
 endmodule

@@ -2,7 +2,7 @@
 # Copyright 2026 Ryota Shioya and Toru Koizumi
 # SPDX-License-Identifier: Apache-2.0
 
-"""32区間のcentered Q14初期値を厳密整数演算で再生成・照合する。"""
+"""32区間のQ14切片と7-bit二bank傾きを再生成・照合する。"""
 
 import argparse
 import re
@@ -13,7 +13,10 @@ INTERVAL_BITS = 5
 INTERVALS = 1 << INTERVAL_BITS
 TABLE_FRACTION_BITS = 14
 DELTA_DROP_BITS = 1
-RESIDUAL_BITS = 11
+COEFFICIENT_TUNE_RESIDUAL_BITS = 11
+RESIDUAL_BITS = 10
+DELTA_ENCODED_BITS = 7
+DELTA_Q12_INTERVALS = 13
 CORRECTION_SEED_DROP_BITS = 1
 ERROR_DROP_BITS = 11
 FINAL_FRACTION_BITS = 27
@@ -26,6 +29,23 @@ NEWTON_ROUND_BIAS = 4
 def round_div(numerator: int, denominator: int) -> int:
     """正の有理数をnearestへ丸める。tieは本生成式では生じない。"""
     return (numerator + denominator // 2) // denominator
+
+
+def round_shift_ties_even(value: int, shift: int) -> int:
+    """非負整数を2^shiftで割り、tie-to-evenで丸める。"""
+    if shift == 0:
+        return value
+    quotient, remainder = divmod(value, 1 << shift)
+    halfway = 1 << (shift - 1)
+    round_up = remainder > halfway or (
+        remainder == halfway and (quotient & 1) != 0
+    )
+    return quotient + int(round_up)
+
+
+def delta_scale_shift(interval: int) -> int:
+    """7-bit傾きをQ12として使う区間では1、Q13では0を返す。"""
+    return int(interval < DELTA_Q12_INTERVALS)
 
 
 def centered_table() -> tuple[list[int], list[int]]:
@@ -52,17 +72,21 @@ def centered_table() -> tuple[list[int], list[int]]:
 
 
 def initial_error_range(
-    interval: int, intercept: int, delta: int
+    interval: int,
+    intercept: int,
+    delta: int,
+    residual_bits: int,
+    scale_shift: int,
 ) -> tuple[int, int]:
     """一行の量子化区間端でsigned Newton残差の最小・最大を返す。"""
     residual_full_bits = 23 - INTERVAL_BITS
-    residual_drop_bits = residual_full_bits - RESIDUAL_BITS
-    interpolation_shift = RESIDUAL_BITS - DELTA_DROP_BITS
+    residual_drop_bits = residual_full_bits - residual_bits
+    interpolation_shift = residual_bits - DELTA_DROP_BITS - scale_shift
     product_one = 1 << (23 + TABLE_FRACTION_BITS)
     minimum: int | None = None
     maximum: int | None = None
 
-    for residual in range(1 << RESIDUAL_BITS):
+    for residual in range(1 << residual_bits):
         seed = intercept - ((delta * residual) >> interpolation_shift)
         residual_low = residual << residual_drop_bits
         residual_high = residual_low + (1 << residual_drop_bits) - 1
@@ -105,7 +129,11 @@ def tune_initial_error(
                 if intercept <= 0 or delta <= 0:
                     continue
                 minimum, maximum = initial_error_range(
-                    interval, intercept, delta
+                    interval,
+                    intercept,
+                    delta,
+                    COEFFICIENT_TUNE_RESIDUAL_BITS,
+                    0,
                 )
                 score = max(abs(minimum), abs(maximum))
                 span = maximum - minimum
@@ -123,14 +151,86 @@ def tune_initial_error(
     return tuned_intercepts, tuned_deltas
 
 
+def tune_scaled_table(
+    base_intercepts: list[int], base_deltas: list[int]
+) -> tuple[list[int], list[int]]:
+    """Q12/Q13二bankの7-bit傾きとQ14切片を決定的に局所調整する。"""
+    tuned_intercepts: list[int] = []
+    tuned_deltas: list[int] = []
+    maximum_delta = (1 << DELTA_ENCODED_BITS) - 1
+    for interval, (base_intercept, base_delta) in enumerate(
+        zip(base_intercepts, base_deltas, strict=True)
+    ):
+        scale_shift = delta_scale_shift(interval)
+        center_delta = round_shift_ties_even(base_delta, scale_shift)
+        best_key: tuple[int, int, int, int] | None = None
+        best_intercept = base_intercept
+        best_delta = center_delta
+        for intercept_offset in range(-3, 4):
+            for delta_offset in range(-2, 3):
+                intercept = base_intercept + intercept_offset
+                delta = center_delta + delta_offset
+                if not (0 < intercept < TABLE_SCALE):
+                    continue
+                if not (0 < delta <= maximum_delta):
+                    continue
+                minimum, maximum = initial_error_range(
+                    interval,
+                    intercept,
+                    delta,
+                    # 検証済み係数は11-bit bucketで調整し、その後RTLの
+                    # residualだけを10 bitへ縮めた探索順を再現する。
+                    COEFFICIENT_TUNE_RESIDUAL_BITS,
+                    scale_shift,
+                )
+                key = (
+                    max(abs(minimum), abs(maximum)),
+                    maximum - minimum,
+                    abs(intercept_offset) + abs(delta_offset),
+                    delta,
+                )
+                if best_key is None or key < best_key:
+                    best_key = key
+                    best_intercept = intercept
+                    best_delta = delta
+        if best_key is None:
+            raise AssertionError(f"区間{interval}の7-bit係数を生成できません")
+        tuned_intercepts.append(best_intercept)
+        tuned_deltas.append(best_delta)
+    return tuned_intercepts, tuned_deltas
+
+
 def generated_values() -> tuple[list[int], list[int], int]:
-    """調整済み32行Q14切片、Q13差分、Newton biasを返す。"""
+    """調整済み32行Q14切片、7-bit二bank傾き、Newton biasを返す。"""
     intercepts, deltas = centered_table()
     intercepts, deltas = tune_initial_error(intercepts, deltas)
+    expected_scale_shifts = [int(delta > 127) for delta in deltas]
+    if expected_scale_shifts != [1] * DELTA_Q12_INTERVALS + [0] * (
+        INTERVALS - DELTA_Q12_INTERVALS
+    ):
+        raise AssertionError("Q12/Q13 bank境界が区間12と13の間にありません")
+    intercepts, deltas = tune_scaled_table(intercepts, deltas)
     if len(intercepts) != INTERVALS or len(deltas) != INTERVALS:
         raise AssertionError("テーブル行数が32ではない")
-    if max(intercepts).bit_length() > 14 or max(deltas).bit_length() > 8:
+    if min(intercepts) < (1 << 13) or max(intercepts).bit_length() > 14:
+        raise AssertionError("生成した切片の共通MSBが1ではない")
+    if max(deltas).bit_length() > DELTA_ENCODED_BITS:
         raise AssertionError("生成した係数がRTLの格納幅を超える")
+    minimum_seed = TABLE_SCALE
+    maximum_seed = 0
+    for interval in range(INTERVALS):
+        shift = RESIDUAL_BITS - DELTA_DROP_BITS - delta_scale_shift(interval)
+        for residual in range(1 << RESIDUAL_BITS):
+            seed = intercepts[interval] - (
+                (deltas[interval] * residual) >> shift
+            )
+            minimum_seed = min(minimum_seed, seed)
+            maximum_seed = max(maximum_seed, seed)
+    if minimum_seed < (1 << 13) or maximum_seed >= (1 << 14):
+        raise AssertionError(
+            f"補間後seedの共通MSBが1ではありません: "
+            f"{minimum_seed}..{maximum_seed}"
+        )
     return intercepts, deltas, NEWTON_ROUND_BIAS
 
 
@@ -138,15 +238,15 @@ def print_values(
     intercepts: list[int], deltas: list[int], newton_bias: int
 ) -> None:
     """SystemVerilogへ転記できる係数を表示する。"""
-    print("reciprocal_intercept_q14 = '{")
+    print("reciprocal_intercept_low_q14 = '{")
     for index, value in enumerate(intercepts):
         suffix = "," if index != INTERVALS - 1 else ""
-        print(f"    14'h{value:04x}{suffix}")
+        print(f"    13'h{value & 0x1fff:04x}{suffix}")
     print("};")
-    print("reciprocal_delta_q13 = '{")
+    print("reciprocal_delta_scaled = '{")
     for index, value in enumerate(deltas):
         suffix = "," if index != INTERVALS - 1 else ""
-        print(f"    8'h{value:02x}{suffix}")
+        print(f"    7'h{value:02x}{suffix}")
     print("};")
     print(f"newton_round_bias = {newton_bias}")
 
@@ -166,12 +266,12 @@ def check_rtl(
     """RTLの係数表、主要信号幅、bit slice、biasを照合する。"""
     text = path.read_text()
     intercept_match = re.search(
-        r"reciprocal_intercept_q14\s*\[0:31\]\s*=\s*'\{(.*?)\};",
+        r"reciprocal_intercept_low_q14\s*\[0:31\]\s*=\s*'\{(.*?)\};",
         text,
         re.DOTALL,
     )
     delta_match = re.search(
-        r"reciprocal_delta_q13\s*\[0:31\]\s*=\s*'\{(.*?)\};",
+        r"reciprocal_delta_scaled\s*\[0:31\]\s*=\s*'\{(.*?)\};",
         text,
         re.DOTALL,
     )
@@ -185,15 +285,15 @@ def check_rtl(
 
     rtl_values = (
         [
-            int(value, 16)
+            (1 << 13) | int(value, 16)
             for value in re.findall(
-                r"14'h([0-9a-fA-F]+)", intercept_match.group(1)
+                r"13'h([0-9a-fA-F]+)", intercept_match.group(1)
             )
         ],
         [
             int(value, 16)
             for value in re.findall(
-                r"8'h([0-9a-fA-F]+)", delta_match.group(1)
+                r"7'h([0-9a-fA-F]+)", delta_match.group(1)
             )
         ],
         int(bias_match.group(1)),
@@ -204,10 +304,19 @@ def check_rtl(
 
     required_patterns = {
         "interval幅": r"wire\s*\[4:0\]\s+interval\s*=\s*x_mant\[22:18\]",
-        "residual幅": r"wire\s*\[10:0\]\s+residual\s*=\s*x_mant\[17:7\]",
-        "補間積幅": r"wire\s*\[18:0\]\s+interpolation_product\s*=",
-        "補間bit slice": r"wire\s*\[8:0\]\s+interpolation\s*=\s*interpolation_product\[18:10\]",
-        "seed幅": r"wire\s*\[13:0\]\s+reciprocal_seed\s*=",
+        "residual幅": r"wire\s*\[9:0\]\s+residual\s*=\s*x_mant\[17:8\]",
+        "補間積幅": r"wire\s*\[16:0\]\s+interpolation_product\s*=",
+        "傾きbank境界": r"wire\s+delta_q12_bank\s*=\s*interval\s*<=\s*5'd12",
+        "補間bit slice": (
+            r"wire\s*\[8:0\]\s+interpolation\s*=\s*delta_q12_bank\s*"
+            r"\?\s*interpolation_product\[16:8\]\s*"
+            r":\s*\{\s*1'b0\s*,\s*interpolation_product\[16:9\]\s*\}"
+        ),
+        "seed下位幅": r"wire\s*\[12:0\]\s+reciprocal_seed_low\s*=",
+        "seed MSB復元": (
+            r"wire\s*\[13:0\]\s+reciprocal_seed\s*=\s*"
+            r"\{\s*1'b1\s*,\s*reciprocal_seed_low\s*\}"
+        ),
         "seed積幅": r"wire\s*\[37:0\]\s+seed_product\s*=",
         "signed modulo残差": (
             r"wire\s+signed\s*\[25:0\]\s+error_excess\s*=\s*"
@@ -232,12 +341,20 @@ def check_rtl(
             r"wire\s*\[23:0\]\s+reciprocal_sig\s*=\s*"
             r"reciprocal_q27\[26:3\]"
         ),
+        "仮数zero共有": r"wire\s+x_mant_zero\s*=\s*~\|x_mant",
+        "指数減算共有": (
+            r"wire\s*\[7:0\]\s+finite_expo\s*=\s*"
+            r"8'd253\s*-\s*x_expo\s*\+\s*"
+            r"\{\s*7'b0\s*,\s*x_mant_zero\s*\}"
+        ),
+        "指数全1 decode共有": r"wire\s+x_expo_all_one\s*=\s*&x_expo",
+        "指数zero decode共有": r"wire\s+x_expo_zero\s*=\s*~\|x_expo",
     }
     for description, pattern in required_patterns.items():
         require_rtl_pattern(text, description, pattern)
 
     print(
-        f"PASS: {path} の32行Q14/Q13係数、主要幅・slice、"
+        f"PASS: {path} の32行Q14/Q12-Q13係数、主要幅・slice、"
         "signed modulo残差、Newton biasが一致しました"
     )
 
@@ -254,7 +371,6 @@ def analyze(intercepts: list[int], deltas: list[int], bias: int) -> None:
     """全非零仮数でfaithful性、単調性、誤差、safe biasを調べる。"""
     residual_full_bits = 23 - INTERVAL_BITS
     residual_drop_bits = residual_full_bits - RESIDUAL_BITS
-    interpolation_shift = RESIDUAL_BITS - DELTA_DROP_BITS
     product_one = 1 << (23 + TABLE_FRACTION_BITS)
     correction_shift = (
         23 + 2 * TABLE_FRACTION_BITS
@@ -279,6 +395,7 @@ def analyze(intercepts: list[int], deltas: list[int], bias: int) -> None:
     maximum_correction = -(1 << 62)
     minimum_correction_product = 1 << 62
     maximum_correction_product = -(1 << 62)
+    minimum_seed = 1 << 62
     maximum_seed = 0
     maximum_error_numerator = 0
     maximum_error_denominator = 1
@@ -288,6 +405,9 @@ def analyze(intercepts: list[int], deltas: list[int], bias: int) -> None:
         interval = fraction >> residual_full_bits
         residual_full = fraction & ((1 << residual_full_bits) - 1)
         residual = residual_full >> residual_drop_bits
+        interpolation_shift = (
+            RESIDUAL_BITS - DELTA_DROP_BITS - delta_scale_shift(interval)
+        )
         interpolation = deltas[interval] * residual >> interpolation_shift
         seed = intercepts[interval] - interpolation
         significand = (1 << 23) | fraction
@@ -334,6 +454,7 @@ def analyze(intercepts: list[int], deltas: list[int], bias: int) -> None:
         maximum_correction_product = max(
             maximum_correction_product, correction_product
         )
+        minimum_seed = min(minimum_seed, seed)
         maximum_seed = max(maximum_seed, seed)
 
         absolute_error_numerator = abs(
@@ -359,6 +480,7 @@ def analyze(intercepts: list[int], deltas: list[int], bias: int) -> None:
     print(f"maximum_error_high={maximum_error_high}")
     print(f"minimum_correction={minimum_correction}")
     print(f"maximum_correction={maximum_correction}")
+    print(f"minimum_seed={minimum_seed}")
     print(f"intercept_bits={max(intercepts).bit_length()}")
     print(f"delta_bits={max(deltas).bit_length()}")
     print(f"seed_bits={maximum_seed.bit_length()}")
@@ -387,10 +509,23 @@ def analyze(intercepts: list[int], deltas: list[int], bias: int) -> None:
         f"{maximum_error_numerator / maximum_error_denominator:.12f}"
     )
     print(f"maximum_error_fraction=0x{maximum_error_fraction:06x}")
-    print(
-        "pass="
-        f"{int(faithful_failures == 0 and monotonicity_violations == 0)}"
-    )
+    required_ranges = {
+        "seed": ((1 << 13) <= minimum_seed and maximum_seed < (1 << 14)),
+        "error_excess": signed_bits(minimum_error, maximum_error) <= 26,
+        "error_high": signed_bits(minimum_error_high, maximum_error_high) <= 15,
+        "correction_product": (
+            signed_bits(minimum_correction_product, maximum_correction_product)
+            <= 29
+        ),
+        "correction": signed_bits(minimum_correction, maximum_correction) <= 16,
+        "safe_bias": safe_bias_low <= bias <= safe_bias_high,
+        "faithful": faithful_failures == 0,
+        "monotonic": monotonicity_violations == 0,
+    }
+    failed_ranges = [name for name, passed in required_ranges.items() if not passed]
+    print(f"pass={int(not failed_ranges)}")
+    if failed_ranges:
+        raise SystemExit("範囲・精度検査に失敗しました: " + ", ".join(failed_ranges))
 
 
 def main() -> None:
