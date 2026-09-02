@@ -16,6 +16,7 @@
 | [`fp32_exp2/`](fp32_exp2/) | `2^x` | 全出力範囲でfaithful | gradual underflow出力に対応 | 非NaN領域で単調非減少 |
 | [`fp32_recip/`](fp32_recip/) | `1/x` | 結果がnormalとなる範囲でfaithful | 入出力ともFTZ | 負領域・正領域ごとに単調非増加 |
 | [`fp32_rsqrt/`](fp32_rsqrt/) | `1/sqrt(x)` | 正のnormal入力でfaithful | subnormal入力はFTZ | `+0`から`+Inf`まで単調非増加 |
+| [`fp32_elementary/`](fp32_elementary/) | `1/x`、`sqrt(x)`、`1/sqrt(x)`、`sin(pi*x)`、`cos(pi*x)`、`log2(x)`、`2^x`の選択出力 | 関数別のULP／絶対誤差条件 | 入出力ともFTZ | 非三角関数は各単調領域の標本検査で違反0 |
 
 faithfulは、無限精度の値を挟む二つのbinary32値のどちらかを返すことを意味します。
 単調非減少では入力を増やしたときに出力が減らず、単調非増加では出力が増えません。
@@ -55,6 +56,9 @@ make lint-fp32_rsqrt
 make test-fp32_rsqrt
 make exhaustive-fp32_rsqrt
 make monotonic-fp32_rsqrt
+make lint-fp32_elementary
+make test-fp32_elementary
+make constants-check-fp32_elementary
 ```
 
 ## Dev container
