@@ -4,15 +4,16 @@
 SHELL := /bin/bash
 .SHELLFLAGS := -eu -o pipefail -c
 
-UNITS := fp32_exp fp32_exp2 fp32_recip fp32_rsqrt fp32_sqrt fp32_log2 fp32_sincospi
-CONSTANT_UNITS := fp32_exp fp32_exp2 fp32_recip fp32_rsqrt fp32_sqrt fp32_log2 fp32_sincospi
+UNITS := fp32_exp fp32_exp2 fp32_recip fp32_rsqrt fp32_sqrt fp32_log2 fp32_sincospi fp32_elementary
+CONSTANT_UNITS := fp32_exp fp32_exp2 fp32_recip fp32_rsqrt fp32_sqrt fp32_log2 fp32_sincospi fp32_elementary
 MONOTONIC_UNITS := fp32_exp fp32_exp2 fp32_recip fp32_rsqrt fp32_sqrt fp32_log2
 
 LINT_TARGETS := $(addprefix lint-,$(UNITS))
 TEST_TARGETS := $(addprefix test-,$(UNITS))
 CLEAN_TARGETS := $(addprefix clean-,$(UNITS))
 CONSTANT_CHECK_TARGETS := $(addprefix constants-check-,$(CONSTANT_UNITS))
-EXHAUSTIVE_TARGETS := $(addprefix exhaustive-,$(UNITS))
+EXHAUSTIVE_UNITS := fp32_exp fp32_exp2 fp32_recip fp32_rsqrt fp32_sqrt fp32_log2 fp32_sincospi
+EXHAUSTIVE_TARGETS := $(addprefix exhaustive-,$(EXHAUSTIVE_UNITS))
 EXHAUSTIVE_ACTIVE_UNITS := fp32_exp fp32_exp2
 EXHAUSTIVE_ACTIVE_TARGETS := $(addprefix exhaustive-active-,$(EXHAUSTIVE_ACTIVE_UNITS))
 MONOTONIC_TARGETS := $(addprefix monotonic-,$(MONOTONIC_UNITS))
