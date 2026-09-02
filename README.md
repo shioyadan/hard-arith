@@ -18,6 +18,8 @@
 | [`fp32_log2/`](fp32_log2/) | `log2(x)` | faithful版とLite誤差版を収録 | faithful版は対応、Lite版は入力FTZ | 正の入力領域で単調非減少 |
 | [`fp32_rsqrt/`](fp32_rsqrt/) | `1/sqrt(x)` | 正のnormal入力でfaithful | subnormal入力はFTZ | `+0`から`+Inf`まで単調非増加 |
 | [`fp32_sqrt/`](fp32_sqrt/) | `sqrt(x)` | 正のnormal入力でfaithful | subnormal入力はFTZ | `+0`から`+Inf`まで単調非減少 |
+| [`fp32_sincospi/`](fp32_sincospi/) | `sin(pi*x)` / `cos(pi*x)` | `FP32SinCosPi`はfaithful、`FP32SinCosPiLite`は絶対誤差`4*2^-23`以下 | faithful版は入出力とも対応、Lite版は絶対誤差のみを規定 | faithful版は各単調区間で保持、Lite版は仕様外 |
+| [`fp32_elementary/`](fp32_elementary/) | `1/x`、`sqrt(x)`、`1/sqrt(x)`、`sin(pi*x)`、`cos(pi*x)`、`log2(x)`、`2^x`の選択出力 | 関数別のULP／絶対誤差条件 | 入出力ともFTZ | 非三角関数は各単調領域の標本検査で違反0 |
 
 faithfulは、無限精度の値を挟む二つのbinary32値のどちらかを返すことを意味します。
 単調非減少では入力を増やしたときに出力が減らず、単調非増加では出力が増えません。
@@ -67,6 +69,12 @@ make lint-fp32_sqrt
 make test-fp32_sqrt
 make exhaustive-fp32_sqrt
 make monotonic-fp32_sqrt
+make lint-fp32_sincospi
+make test-fp32_sincospi
+make exhaustive-fp32_sincospi
+make lint-fp32_elementary
+make test-fp32_elementary
+make constants-check-fp32_elementary
 ```
 
 ## Dev container
