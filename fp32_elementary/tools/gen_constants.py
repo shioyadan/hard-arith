@@ -16,6 +16,8 @@ C1_FRACTION_BITS = 17
 C2_FRACTION_BITS = 9
 REDUCED_C2_FRACTION_BITS = 8
 DELTA_FRACTION_BITS = 23
+EXP2_C0_FRACTION_BITS = 27
+EXP2_DELTA_FRACTION_BITS = 24
 LINEAR_SEARCH_RADIUS = 12
 QUADRATIC_SEARCH_RADIUS = 8
 GRID_DIVISIONS = 4096
@@ -93,6 +95,130 @@ def tune_row(
     return best[1], best[2], best[3], best[0]
 
 
+def binary32_q(bits, fraction_bits: int):
+    """正のnormal binary32 bit列を指定Q形式の厳密な整数へ直す。"""
+    bits = np.asarray(bits, dtype=np.uint32)
+    exponent = ((bits >> 23) & 0xff).astype(np.int64)-127
+    significand = ((bits & 0x7fffff) | 0x800000).astype(np.int64)
+    return significand << (exponent+fraction_bits-23)
+
+
+def exp2_polynomial_bounds(index: int):
+    """量子化残差の各cell全体で1 ULPを満たすQ27上下限を返す。"""
+    half_integer = 1 << (EXP2_DELTA_FRACTION_BITS-7)
+    delta = np.arange(-half_integer, half_integer+1, dtype=np.int64)
+    unit = 2.0**-EXP2_DELTA_FRACTION_BITS
+    lower_argument = index/64.0+(delta-0.5)*unit
+    upper_argument = index/64.0+(delta+0.5)*unit
+    lower_reference = np.exp2(lower_argument).astype(np.float32).view(np.uint32)
+    upper_reference = np.exp2(upper_argument).astype(np.float32).view(np.uint32)
+
+    # exp2は単調増加なので、cell両端のRNE値から許容出力codeの共通範囲を得る。
+    lowest_output = upper_reference-1
+    highest_output = lower_reference+1
+
+    # Q27 packerが許容codeへ丸める整数範囲を、隣接値との中点から逆算する。
+    lower_sum = (
+        binary32_q(lowest_output-1, EXP2_C0_FRACTION_BITS)
+        + binary32_q(lowest_output, EXP2_C0_FRACTION_BITS)
+    )
+    upper_sum = (
+        binary32_q(highest_output, EXP2_C0_FRACTION_BITS)
+        + binary32_q(highest_output+1, EXP2_C0_FRACTION_BITS)
+    )
+    lower = (lower_sum+1)//2
+    lower += ((lower_sum & 1) == 0) & ((lowest_output & 1) != 0)
+    upper = upper_sum//2
+    upper -= ((upper_sum & 1) == 0) & ((highest_output & 1) != 0)
+    return delta, lower.astype(np.int64), upper.astype(np.int64)
+
+
+def pack_exp2_reduced_q27(value):
+    """[2^-1,2)の正のQ27値をbinary32 RNE codeへ変換する。"""
+    value = np.asarray(value, dtype=np.int64)
+    shift = np.where(value < (1 << 27), 3, 4)
+    quotient = value >> shift
+    remainder = value & ((1 << shift)-1)
+    half = 1 << (shift-1)
+    quotient += (remainder > half) | (
+        (remainder == half) & ((quotient & 1) != 0)
+    )
+    exponent = np.where(value < (1 << 27), 126, 127)
+    return (exponent << 23)+(quotient-(1 << 23))
+
+
+def make_exp2_rows():
+    """最終1 ULP条件と単調性へC0を合わせたexp2係数を作る。"""
+    rows = make_centered_rows(
+        lambda value: 2.0**value,
+        [index/64.0 for index in range(64)],
+        1.0/128,
+        26,
+        C1_FRACTION_BITS,
+        C2_FRACTION_BITS,
+    )
+    domains = []
+    for index, (c0, c1, c2, error) in enumerate(rows):
+        delta, lower, upper = exp2_polynomial_bounds(index)
+        c1_q18 = c1 << 1
+        inner = c1_q18+round_signed_shift_array(
+            delta*c2,
+            EXP2_DELTA_FRACTION_BITS+C2_FRACTION_BITS-(C1_FRACTION_BITS+1),
+        )
+        correction = round_signed_shift_array(
+            delta*inner,
+            EXP2_DELTA_FRACTION_BITS+(C1_FRACTION_BITS+1)
+            - EXP2_C0_FRACTION_BITS,
+        )
+        lowest_c0 = int(np.max(lower-correction))
+        highest_c0 = int(np.min(upper-correction))
+        if lowest_c0 > highest_c0:
+            raise SystemExit(f"exp2 table {index}に1 ULPを満たすC0がありません")
+        scaled_c0 = c0 << (EXP2_C0_FRACTION_BITS-26)
+        candidates = []
+        for candidate_c0 in range(lowest_c0, highest_c0+1):
+            output = pack_exp2_reduced_q27(candidate_c0+correction)
+            if np.any(np.diff(output) < 0):
+                continue
+            candidates.append((
+                candidate_c0,
+                int(output[0]),
+                int(output[-1]),
+                abs(candidate_c0-scaled_c0),
+            ))
+        if not candidates:
+            raise SystemExit(f"exp2 table {index}に単調なC0がありません")
+        domains.append(candidates)
+
+    # 隣接table境界と63->0の指数繰り上がりも含め、変更量最小のC0列を選ぶ。
+    best = None
+    for first in domains[0]:
+        states = [(first[3], [first])]
+        for candidates in domains[1:]:
+            next_states = []
+            for candidate in candidates:
+                compatible = [
+                    state for state in states
+                    if state[1][-1][2] <= candidate[1]
+                ]
+                if compatible:
+                    cost, path = min(compatible, key=lambda state: state[0])
+                    next_states.append((cost+candidate[3], path+[candidate]))
+            states = next_states
+        for cost, path in states:
+            if path[-1][2] <= first[1]+(1 << 23):
+                candidate = (cost, path)
+                if best is None or candidate[0] < best[0]:
+                    best = candidate
+    if best is None:
+        raise SystemExit("exp2 table境界を単調にするC0列がありません")
+
+    return [
+        (candidate[0], c1, c2, error)
+        for candidate, (_, c1, c2, error) in zip(best[1], rows)
+    ]
+
+
 def make_rows(
     function,
     count: int,
@@ -142,14 +268,27 @@ def validate_datapath_ranges(
     half_integer: int,
     c0_fraction_bits: int,
     c2_fraction_bits: int,
+    delta_fraction_bits: int = DELTA_FRACTION_BITS,
+    c1_fraction_bits: int = C1_FRACTION_BITS,
+    include_upper_endpoint: bool = False,
 ):
     """生成係数を共有Horner datapathへ通し、切り詰めた幅を全残差で検査する。"""
-    delta = np.arange(-half_integer, half_integer, dtype=np.int64)
+    delta = np.arange(
+        -half_integer,
+        half_integer+int(include_upper_endpoint),
+        dtype=np.int64,
+    )
     limits = {
-        "inner_product_q32": (-(1 << 30), (1 << 30)-1),
-        "inner_correction_q17": (-(1 << 12), (1 << 12)-1),
-        "inner_q17": (-(1 << 19), (1 << 19)-1),
-        "outer_product_q40": (-(1 << 37), (1 << 37)-1),
+        "inner_product": (-(1 << 31), (1 << 31)-1),
+        "inner_correction": (
+            -(1 << (c1_fraction_bits-5)),
+            (1 << (c1_fraction_bits-5))-1,
+        ),
+        "inner": (
+            -(1 << (c1_fraction_bits+2)),
+            (1 << (c1_fraction_bits+2))-1,
+        ),
+        "outer_product": (-(1 << 39), (1 << 39)-1),
         "outer_correction": (
             -(1 << (c0_fraction_bits-6)),
             (1 << (c0_fraction_bits-6))-1,
@@ -163,23 +302,24 @@ def validate_datapath_ranges(
 
     for c0, c1, c2, _ in rows:
         c2_q9 = c2 << (C2_FRACTION_BITS-c2_fraction_bits)
+        c1_value = c1 << (c1_fraction_bits-C1_FRACTION_BITS)
         inner_product = delta*c2_q9
         inner_correction = round_signed_shift_array(
             inner_product,
-            DELTA_FRACTION_BITS+C2_FRACTION_BITS-C1_FRACTION_BITS,
+            delta_fraction_bits+C2_FRACTION_BITS-c1_fraction_bits,
         )
-        inner = c1+inner_correction
+        inner = c1_value+inner_correction
         outer_product = delta*inner
         outer_correction = round_signed_shift_array(
             outer_product,
-            DELTA_FRACTION_BITS+C1_FRACTION_BITS-c0_fraction_bits,
+            delta_fraction_bits+c1_fraction_bits-c0_fraction_bits,
         )
         polynomial = c0+outer_correction
         values = {
-            "inner_product_q32": inner_product,
-            "inner_correction_q17": inner_correction,
-            "inner_q17": inner,
-            "outer_product_q40": outer_product,
+            "inner_product": inner_product,
+            "inner_correction": inner_correction,
+            "inner": inner,
+            "outer_product": outer_product,
             "outer_correction": outer_correction,
             "polynomial": polynomial,
         }
@@ -270,39 +410,43 @@ def generate_block() -> str:
         lambda value: 1.0/math.sqrt(2.0*value), 128, 1.0/128
     )
     log2 = make_rows(math.log2, 64, 1.0/64)
-    exp2 = make_centered_rows(
-        lambda value: 2.0**value,
-        [index/64.0 for index in range(64)],
-        1.0/128,
-        26,
-        C1_FRACTION_BITS,
-        C2_FRACTION_BITS,
-    )
+    exp2 = make_exp2_rows()
     sine = make_centered_rows(
         lambda value: math.sin(math.pi*value),
         [(index+0.5)/128.0 for index in range(64)],
         1.0/256,
     )
 
-    for name, rows, half_integer, c0_fraction_bits, c2_fraction_bits in (
+    for (name, rows, half_integer, c0_fraction_bits, c2_fraction_bits,
+         delta_fraction_bits, c1_fraction_bits, include_upper_endpoint) in (
         ("reciprocal", reciprocal, 1 << 15,
-         REDUCED_C0_FRACTION_BITS, REDUCED_C2_FRACTION_BITS),
+         REDUCED_C0_FRACTION_BITS, REDUCED_C2_FRACTION_BITS,
+         DELTA_FRACTION_BITS, C1_FRACTION_BITS, False),
         ("sqrt_base", sqrt_base, 1 << 16,
-         REDUCED_C0_FRACTION_BITS, REDUCED_C2_FRACTION_BITS),
+         REDUCED_C0_FRACTION_BITS, REDUCED_C2_FRACTION_BITS,
+         DELTA_FRACTION_BITS, C1_FRACTION_BITS, False),
         ("sqrt_scaled", sqrt_scaled, 1 << 16,
-         REDUCED_C0_FRACTION_BITS, REDUCED_C2_FRACTION_BITS),
+         REDUCED_C0_FRACTION_BITS, REDUCED_C2_FRACTION_BITS,
+         DELTA_FRACTION_BITS, C1_FRACTION_BITS, False),
         ("rsqrt_base", rsqrt_base, 1 << 15,
-         REDUCED_C0_FRACTION_BITS, REDUCED_C2_FRACTION_BITS),
+         REDUCED_C0_FRACTION_BITS, REDUCED_C2_FRACTION_BITS,
+         DELTA_FRACTION_BITS, C1_FRACTION_BITS, False),
         ("rsqrt_scaled", rsqrt_scaled, 1 << 15,
-         REDUCED_C0_FRACTION_BITS, REDUCED_C2_FRACTION_BITS),
+         REDUCED_C0_FRACTION_BITS, REDUCED_C2_FRACTION_BITS,
+         DELTA_FRACTION_BITS, C1_FRACTION_BITS, False),
         ("log2", log2, 1 << 16,
-         REDUCED_C0_FRACTION_BITS, REDUCED_C2_FRACTION_BITS),
-        ("exp2", exp2, 1 << 16, 26, C2_FRACTION_BITS),
+         REDUCED_C0_FRACTION_BITS, REDUCED_C2_FRACTION_BITS,
+         DELTA_FRACTION_BITS, C1_FRACTION_BITS, False),
+        ("exp2", exp2, 1 << 17,
+         EXP2_C0_FRACTION_BITS, C2_FRACTION_BITS,
+         EXP2_DELTA_FRACTION_BITS, C1_FRACTION_BITS+1, True),
         ("sine", sine, 1 << 15,
-         REDUCED_C0_FRACTION_BITS, REDUCED_C2_FRACTION_BITS),
+         REDUCED_C0_FRACTION_BITS, REDUCED_C2_FRACTION_BITS,
+         DELTA_FRACTION_BITS, C1_FRACTION_BITS, False),
     ):
         validate_datapath_ranges(
-            name, rows, half_integer, c0_fraction_bits, c2_fraction_bits
+            name, rows, half_integer, c0_fraction_bits, c2_fraction_bits,
+            delta_fraction_bits, c1_fraction_bits, include_upper_endpoint,
         )
 
     lines = [BEGIN_MARKER]
@@ -319,7 +463,7 @@ def generate_block() -> str:
          C1_FRACTION_BITS, REDUCED_C2_FRACTION_BITS),
         ("log2", log2, REDUCED_C0_FRACTION_BITS,
          C1_FRACTION_BITS, REDUCED_C2_FRACTION_BITS),
-        ("exp2", exp2, 26,
+        ("exp2", exp2, EXP2_C0_FRACTION_BITS,
          C1_FRACTION_BITS, C2_FRACTION_BITS),
         ("sine", sine, REDUCED_C0_FRACTION_BITS,
          C1_FRACTION_BITS, REDUCED_C2_FRACTION_BITS),
