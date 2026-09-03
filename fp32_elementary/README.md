@@ -74,7 +74,7 @@ FP32Elementary u_elementary (
 
 | 演算 | 有限値の精度条件 |
 |---|---|
-| `2^x` | RNE参照値から最大1 ULPを目標とする |
+| `2^x` | RNE参照値から最大1 ULP |
 | `1/x` | RNE参照値から最大1 ULP |
 | `1/sqrt(x)` | RNE参照値から最大1 ULP |
 | `sqrt(x)` | RNE参照値から最大1 ULP |
@@ -158,14 +158,14 @@ binary64参照値を使い、境界、丸め中点付近、誤差超過候補695
 | `log2(x)` | `0.5 <= x < 2`の全16,777,216入力 | 0 | `1.269744 * 2^-23` | 0 |
 | `sin(pi*x)` | 全4,194,305 Q23還元位相 | 0 | `2.527783 * 2^-23` | 774、最大1 ULP |
 | `cos(pi*x)` | 全4,194,305 Q23還元位相 | 0 | `2.527783 * 2^-23` | 774、最大1 ULP |
-| `2^x` | 全`2^32`入力 | 235,867 | 2 ULP | 14、最大1 ULP |
+| `2^x` | 全`2^32`入力 | 0 | 1 ULP | 0 |
 
 全指数fieldとtable境界を組み合わせた各328,192入力では、七関数とも精度違反0でした。
 また、不正な`op` 1,936組合せがすべてcanonical quiet NaNを返すことを確認しました。
 
-`2^x`は有限入力235,867個で最大1 ULP目標を超え、観測最大は2 ULPです。最初の違反は
-`x=0x3ea99402`、出力`0x3fa1084e`、RNE参照値`0x3fa1084c`です。特殊値16,777,216入力の
-不一致は0でした。sqrtとrsqrtの単調性逆行もそれぞれ38件と110件あり、いずれも1 ULPです。
+`2^x`は有限4,278,190,080入力で最大1 ULP、精度違反0、隣接単調性違反0でした。
+特殊値16,777,216入力の不一致も0でした。sqrtとrsqrtの単調性逆行はそれぞれ38件と
+110件あり、いずれも1 ULPです。
 sinpiとcospiの単調性は絶対誤差仕様の合否には使わず、診断値として記録しています。
 
 以上はRTL入力または引数還元後の離散空間を列挙した検査であり、形式証明や
@@ -247,12 +247,13 @@ inner = C1+round(d*C2)
 value = C0+round(d*inner)
 ```
 
-`d^2`を別途生成せずHorner形で計算するため、可変乗算は18 x 13 bitと
-18 x 20 bitの二回です。`C1`は全関数でsigned Q17 20 bitです。
-`C0`と`C2`は、精度に必要な`2^x`だけをsigned Q26 28 bitとsigned Q9 13 bit、
-他の関数をsigned Q25 27 bitとsigned Q8 12 bitで格納し、計算前に共通Q26/Q9へ揃えます。
+`d^2`を別途生成せずHorner形で計算するため、可変乗算は19 x 13 bitと
+19 x 21 bitの二回です。`C1`は全関数でsigned Q17 20 bitとして格納し、`2^x`の
+Horner中間値だけをQ18に保ちます。`C0`と`C2`は、精度に必要な`2^x`だけを
+signed Q27 29 bitとsigned Q9 13 bit、他の関数をsigned Q25 27 bitと
+signed Q8 12 bitで格納し、計算前に共通Q27/Q9へ揃えます。
 
-最後に関数ごとの指数scaleと符号を戻し、共通Q26 packerがleading bitの位置から
+最後に関数ごとの指数scaleと符号を戻し、共通Q27 packerがleading bitの位置から
 指数と仮数を作ります。`2^scale`の乗算は整数乗算器ではなく出力指数の加減算で実現し、
 overflowは`Inf`、underflowはflush-to-zeroで処理します。
 
@@ -263,9 +264,13 @@ overflowは`Inf`、underflowはflush-to-zeroで処理します。
 均衡させる`C0`を選びます。実数係数を個別に丸めるのではなく、量子化後の
 Horner演算と中間丸めを含む最大誤差が小さくなるように調整します。
 
+`2^x`ではさらに、Q24残差の各量子化cellに対応する実引数区間を調べ、共通packerの
+出力が区間全体でRNE参照値から1 ULP以内になるQ27の`C0`範囲を逆算します。その範囲内で
+各区間内とtable境界の出力が単調になる`C0`列を選びます。
+
 係数は合計704行です。各bank内で全行に共通する上位bitを個別の行へ格納せず、
-一つのprefixと行ごとのsuffixに分けます。共通bitを含む係数量は41,664 bit、
-RTLのtableへ実際に格納するsuffixは34,048 bitです。
+一つのprefixと行ごとのsuffixに分けます。共通bitを含む係数量は41,728 bit、
+RTLのtableへ実際に格納するsuffixは34,112 bitです。
 
 二のべき格子点、sin/cosの零点と極値は、多項式近似をbypassして厳密値を返します。
 
@@ -275,15 +280,15 @@ RTLのtableへ実際に格納するsuffixは34,048 bitです。
 
 | 信号・係数 | 幅 | 形式 | 役割 |
 |---|---:|---|---|
-| `polynomial_delta_q23` | 18 | signed Q23 | 区間中央からの差`d` |
-| `coefficient_c0_q26` | 28 | signed Q26 | 共通形式へ揃えた定数項 |
+| `polynomial_delta_q24` | 19 | signed Q24 | 区間中央からの差`d` |
+| `coefficient_c0_q27` | 29 | signed Q27 | 共通形式へ揃えた定数項 |
 | `coefficient_c1_q17` | 20 | signed Q17 | 一次係数 |
 | `coefficient_c2_q9` | 13 | signed Q9 | 共通形式へ揃えた二次係数 |
-| `inner_product_q32` | 31 | signed Q32 | `d*C2` |
-| `inner_q17` | 20 | signed Q17 | `C1+round(d*C2)` |
-| `outer_product_q40` | 38 | signed Q40 | `d*inner` |
-| `polynomial_q26` | 28 | signed Q26 | 二次近似結果 |
-| `value_q26` | 35 | signed Q26 | `log2`の整数部を含むpacker入力 |
+| `inner_product_q33` | 32 | signed Q33 | `d*C2` |
+| `inner_q18` | 21 | signed Q18 | `C1+round(d*C2)` |
+| `outer_product_q42` | 40 | signed Q42 | `d*inner` |
+| `polynomial_q27` | 29 | signed Q27 | 二次近似結果 |
+| `value_q27` | 36 | signed Q27 | `log2`の整数部を含むpacker入力 |
 
 全table行と各区間で表現可能な全`d`に対し、中間補正、乗算結果、最終値が
 宣言幅から溢れないことを係数生成時に検査します。

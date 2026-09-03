@@ -522,24 +522,24 @@ module FP32Elementary(
         8'd207, 8'd208, 8'd209, 8'd209 // 60 .. 63
     };
 
-    localparam [1:0] exp2_c0_q26_prefix = 2'b01;
-    localparam [25:0] exp2_c0_q26_suffix [0:63] = '{
-        26'd0, 26'd730769, 26'd1469491, 26'd2216262, // 0 .. 3
-        26'd2971166, 26'd3734283, 26'd4505718, 26'd5285545, // 4 .. 7
-        26'd6073872, 26'd6870776, 26'd7676365, 26'd8490719, // 8 .. 11
-        26'd9313948, 26'd10146134, 26'd10987390, 26'd11837800, // 12 .. 15
-        26'd12697476, 26'd13566508, 26'd14445009, 26'd15333070, // 16 .. 19
-        26'd16230802, 26'd17138315, 26'd18055705, 26'd18983084, // 20 .. 23
-        26'd19920562, 26'd20868256, 26'd21826262, 26'd22794700, // 24 .. 27
-        26'd23773685, 26'd24763336, 26'd25763757, 26'd26775073, // 28 .. 31
-        26'd27797401, 26'd28830862, 26'd29875576, 26'd30931668, // 32 .. 35
-        26'd31999258, 26'd33078475, 26'd34169444, 26'd35272292, // 36 .. 39
-        26'd36387151, 26'd37514149, 26'd38653419, 26'd39805096, // 40 .. 43
-        26'd40969313, 26'd42146208, 26'd43335919, 26'd44538579, // 44 .. 47
-        26'd45754341, 26'd46983343, 26'd48225727, 26'd49481634, // 48 .. 51
-        26'd50751224, 26'd52034638, 26'd53332022, 26'd54643540, // 52 .. 55
-        26'd55969332, 26'd57309569, 26'd58664395, 26'd60033978, // 56 .. 59
-        26'd61418469, 26'd62818045, 26'd64232853, 26'd65663074 // 60 .. 63
+    localparam [1:0] exp2_c0_q27_prefix = 2'b01;
+    localparam [26:0] exp2_c0_q27_suffix [0:63] = '{
+        27'd4, 27'd1461544, 27'd2938984, 27'd4432528, // 0 .. 3
+        27'd5942332, 27'd7468566, 27'd9011436, 27'd10571090, // 4 .. 7
+        27'd12147744, 27'd13741552, 27'd15352730, 27'd16981438, // 8 .. 11
+        27'd18627896, 27'd20292268, 27'd21974780, 27'd23675599, // 12 .. 15
+        27'd25394952, 27'd27133016, 27'd28890018, 27'd30666140, // 16 .. 19
+        27'd32461604, 27'd34276630, 27'd36111410, 27'd37966168, // 20 .. 23
+        27'd39841124, 27'd41736512, 27'd43652524, 27'd45589400, // 24 .. 27
+        27'd47547370, 27'd49526673, 27'd51527514, 27'd53550146, // 28 .. 31
+        27'd55594802, 27'd57661724, 27'd59751152, 27'd61863336, // 32 .. 35
+        27'd63998516, 27'd66156950, 27'd68338888, 27'd70544584, // 36 .. 39
+        27'd72774302, 27'd75028298, 27'd77306841, 27'd79610193, // 40 .. 43
+        27'd81938624, 27'd84292415, 27'd86671838, 27'd89077158, // 44 .. 47
+        27'd91508682, 27'd93966686, 27'd96451454, 27'd98963268, // 48 .. 51
+        27'd101502448, 27'd104069276, 27'd106664044, 27'd109287080, // 52 .. 55
+        27'd111938664, 27'd114619138, 27'd117328790, 27'd120067956, // 56 .. 59
+        27'd122836938, 27'd125636090, 27'd128465706, 27'd131326152 // 60 .. 63
     };
 
     localparam [1:0] exp2_c1_q17_prefix = 2'b00;
@@ -690,8 +690,8 @@ module FP32Elementary(
     wire signed [21:0] exp2_r_q28 = x_sign
         ? ~exp2_r_magnitude_q28 : exp2_r_magnitude_q28;
     wire signed [22:0] exp2_r_biased_q28 =
-        $signed({exp2_r_q28[21], exp2_r_q28})+23'sd16;
-    wire signed [17:0] exp2_delta_q23 = exp2_r_biased_q28[22:5];
+        $signed({exp2_r_q28[21], exp2_r_q28})+23'sd8;
+    wire signed [18:0] exp2_delta_q24 = exp2_r_biased_q28[22:4];
 
     // sin/cosではQ23の周期2位相を作り、cosだけ0.5を加えてから[0,0.5]へ折り返す。
     wire [4:0] phase_left_shift = x_exponent >= 8'd127
@@ -720,17 +720,17 @@ module FP32Elementary(
     wire sine_result_sign = selected_phase[23]^(x_sign&select_sinpi);
 
     // funcごとの係数bankと差分を選び、二つの乗算だけでHorner評価する。
-    wire signed [17:0] polynomial_delta_q23 = select_recip | select_rsqrt
-        ? {{1{mantissa_delta_m7_q23[16]}}, mantissa_delta_m7_q23}
-        : select_sqrt | select_log2 ? mantissa_delta_m6_q23
-        : select_exp2 ? exp2_delta_q23
-        : {{2{sine_delta_q23[15]}}, sine_delta_q23};
+    wire signed [18:0] polynomial_delta_q24 = select_recip | select_rsqrt
+        ? {{1{mantissa_delta_m7_q23[16]}}, mantissa_delta_m7_q23, 1'b0}
+        : select_sqrt | select_log2 ? {mantissa_delta_m6_q23, 1'b0}
+        : select_exp2 ? exp2_delta_q24
+        : {{2{sine_delta_q23[15]}}, sine_delta_q23, 1'b0};
 
     // 各bankで共通する上位bitはtableに置かず、読み出し時に再連結する。
-    wire signed [27:0] reciprocal_c0_q26_value = $signed({
+    wire signed [28:0] reciprocal_c0_q27_value = $signed({
         reciprocal_c0_q25_prefix,
         reciprocal_c0_q25_suffix[mantissa_index_m7],
-        1'b0
+        2'b0
     });
     wire signed [19:0] reciprocal_c1_q17_value = $signed({
         reciprocal_c1_q17_prefix,
@@ -741,14 +741,14 @@ module FP32Elementary(
         reciprocal_c2_q8_suffix[mantissa_index_m7],
         1'b0
     });
-    wire signed [27:0] sqrt_c0_q26_value = exponent_parity ? $signed({
+    wire signed [28:0] sqrt_c0_q27_value = exponent_parity ? $signed({
         sqrt_scaled_c0_q25_prefix,
         sqrt_scaled_c0_q25_suffix[mantissa_index_m6],
-        1'b0
+        2'b0
     }) : $signed({
         sqrt_base_c0_q25_prefix,
         sqrt_base_c0_q25_suffix[mantissa_index_m6],
-        1'b0
+        2'b0
     });
     wire signed [19:0] sqrt_c1_q17_value = exponent_parity ? $signed({
         sqrt_scaled_c1_q17_prefix,
@@ -766,14 +766,14 @@ module FP32Elementary(
         sqrt_base_c2_q8_suffix[mantissa_index_m6],
         1'b0
     });
-    wire signed [27:0] rsqrt_c0_q26_value = exponent_parity ? $signed({
+    wire signed [28:0] rsqrt_c0_q27_value = exponent_parity ? $signed({
         rsqrt_scaled_c0_q25_prefix,
         rsqrt_scaled_c0_q25_suffix[mantissa_index_m7],
-        1'b0
+        2'b0
     }) : $signed({
         rsqrt_base_c0_q25_prefix,
         rsqrt_base_c0_q25_suffix[mantissa_index_m7],
-        1'b0
+        2'b0
     });
     wire signed [19:0] rsqrt_c1_q17_value = exponent_parity ? $signed({
         rsqrt_scaled_c1_q17_prefix,
@@ -791,8 +791,8 @@ module FP32Elementary(
         rsqrt_base_c2_q8_suffix[mantissa_index_m7],
         1'b0
     });
-    wire signed [27:0] log2_c0_q26_value = $signed({
-        log2_c0_q25_prefix, log2_c0_q25_suffix[mantissa_index_m6], 1'b0
+    wire signed [28:0] log2_c0_q27_value = $signed({
+        log2_c0_q25_prefix, log2_c0_q25_suffix[mantissa_index_m6], 2'b0
     });
     wire signed [19:0] log2_c1_q17_value = $signed({
         log2_c1_q17_prefix, log2_c1_q17_suffix[mantissa_index_m6]
@@ -800,8 +800,8 @@ module FP32Elementary(
     wire signed [12:0] log2_c2_q9_value = $signed({
         log2_c2_q8_prefix, log2_c2_q8_suffix[mantissa_index_m6], 1'b0
     });
-    wire signed [27:0] exp2_c0_q26_value = $signed({
-        exp2_c0_q26_prefix, exp2_c0_q26_suffix[exp2_table_index]
+    wire signed [28:0] exp2_c0_q27_value = $signed({
+        exp2_c0_q27_prefix, exp2_c0_q27_suffix[exp2_table_index]
     });
     wire signed [19:0] exp2_c1_q17_value = $signed({
         exp2_c1_q17_prefix, exp2_c1_q17_suffix[exp2_table_index]
@@ -809,8 +809,8 @@ module FP32Elementary(
     wire signed [12:0] exp2_c2_q9_value = $signed({
         exp2_c2_q9_prefix, exp2_c2_q9_suffix[exp2_table_index]
     });
-    wire signed [27:0] sine_c0_q26_value = $signed({
-        sine_c0_q25_prefix, sine_c0_q25_suffix[sine_table_index], 1'b0
+    wire signed [28:0] sine_c0_q27_value = $signed({
+        sine_c0_q25_prefix, sine_c0_q25_suffix[sine_table_index], 2'b0
     });
     wire signed [19:0] sine_c1_q17_value = $signed({
         sine_c1_q17_prefix, sine_c1_q17_suffix[sine_table_index]
@@ -819,13 +819,13 @@ module FP32Elementary(
         sine_c2_q8_prefix, sine_c2_q8_suffix[sine_table_index], 1'b0
     });
 
-    wire signed [27:0] coefficient_c0_q26 = select_recip
-        ? reciprocal_c0_q26_value
-        : select_sqrt ? sqrt_c0_q26_value
-        : select_rsqrt ? rsqrt_c0_q26_value
-        : select_log2 ? log2_c0_q26_value
-        : select_exp2 ? exp2_c0_q26_value
-        : sine_c0_q26_value;
+    wire signed [28:0] coefficient_c0_q27 = select_recip
+        ? reciprocal_c0_q27_value
+        : select_sqrt ? sqrt_c0_q27_value
+        : select_rsqrt ? rsqrt_c0_q27_value
+        : select_log2 ? log2_c0_q27_value
+        : select_exp2 ? exp2_c0_q27_value
+        : sine_c0_q27_value;
     wire signed [19:0] coefficient_c1_q17 = select_recip
         ? reciprocal_c1_q17_value
         : select_sqrt ? sqrt_c1_q17_value
@@ -841,41 +841,49 @@ module FP32Elementary(
         : select_exp2 ? exp2_c2_q9_value
         : sine_c2_q9_value;
 
-    wire signed [30:0] inner_product_q32 =
-        polynomial_delta_q23*coefficient_c2_q9;
-    wire signed [31:0] inner_product_biased_q32 =
-        $signed({inner_product_q32[30], inner_product_q32})+32'sd16384;
-    wire signed [12:0] inner_correction_q17 =
-        inner_product_biased_q32[27:15];
-    wire signed [19:0] inner_q17 = coefficient_c1_q17
-        + {{7{inner_correction_q17[12]}}, inner_correction_q17};
-    wire signed [37:0] outer_product_q40 = polynomial_delta_q23*inner_q17;
-    wire signed [38:0] outer_product_biased_q40 =
-        $signed({outer_product_q40[37], outer_product_q40})
-        + (select_exp2 ? 39'sd8192 : 39'sd16384);
-    wire signed [20:0] outer_correction_exp_q26 =
-        outer_product_biased_q40[34:14];
+    wire signed [31:0] inner_product_q33 =
+        polynomial_delta_q24*coefficient_c2_q9;
+    wire signed [32:0] inner_product_biased_q33 =
+        $signed({inner_product_q33[31], inner_product_q33})
+        + (select_exp2 ? 33'sd16384 : 33'sd32768);
+    wire signed [13:0] inner_correction_exp_q18 =
+        inner_product_biased_q33[28:15];
+    wire signed [12:0] inner_correction_reduced_q17 =
+        inner_product_biased_q33[28:16];
+    wire signed [13:0] inner_correction_q18 = select_exp2
+        ? inner_correction_exp_q18
+        : $signed({inner_correction_reduced_q17, 1'b0});
+    wire signed [20:0] coefficient_c1_q18 =
+        $signed({coefficient_c1_q17, 1'b0});
+    wire signed [20:0] inner_q18 = coefficient_c1_q18
+        + {{7{inner_correction_q18[13]}}, inner_correction_q18};
+    wire signed [39:0] outer_product_q42 = polynomial_delta_q24*inner_q18;
+    wire signed [40:0] outer_product_biased_q42 =
+        $signed({outer_product_q42[39], outer_product_q42})
+        + (select_exp2 ? 41'sd16384 : 41'sd65536);
+    wire signed [21:0] outer_correction_exp_q27 =
+        outer_product_biased_q42[36:15];
     wire signed [19:0] outer_correction_reduced_q25 =
-        outer_product_biased_q40[34:15];
-    wire signed [20:0] outer_correction_q26 = select_exp2
-        ? outer_correction_exp_q26
-        : $signed({outer_correction_reduced_q25, 1'b0});
-    wire signed [27:0] polynomial_q26 = coefficient_c0_q26
-        + {{7{outer_correction_q26[20]}}, outer_correction_q26};
+        outer_product_biased_q42[36:17];
+    wire signed [21:0] outer_correction_q27 = select_exp2
+        ? outer_correction_exp_q27
+        : $signed({outer_correction_reduced_q25, 2'b0});
+    wire signed [28:0] polynomial_q27 = coefficient_c0_q27
+        + {{7{outer_correction_q27[21]}}, outer_correction_q27};
 
     // 数学的に厳密な格子点は近似をbypassする。
     wire reciprocal_exact = x_fraction_zero;
     wire sqrt_exact = x_fraction_zero & ~exponent_parity;
     wire rsqrt_exact = x_fraction_zero & ~exponent_parity;
-    wire exp2_exact = exp2_table_index == 0 & exp2_delta_q23 == 0;
-    wire signed [28:0] reduced_value_q26 =
+    wire exp2_exact = exp2_table_index == 0 & exp2_delta_q24 == 0;
+    wire signed [29:0] reduced_value_q27 =
         (select_recip & reciprocal_exact)
         | (select_sqrt & sqrt_exact)
         | (select_rsqrt & rsqrt_exact)
-        | (select_exp2 & exp2_exact) ? 29'sd67108864
-        : (select_sinpi | select_cospi) & sine_argument_is_zero ? 29'sd0
+        | (select_exp2 & exp2_exact) ? 30'sd134217728
+        : (select_sinpi | select_cospi) & sine_argument_is_zero ? 30'sd0
         : (select_sinpi | select_cospi) & sine_argument_is_half
-            ? 29'sd67108864 : $signed({polynomial_q26[27], polynomial_q26});
+            ? 30'sd134217728 : $signed({polynomial_q27[28], polynomial_q27});
 
     wire signed [9:0] sqrt_scale =
         (input_unbiased_exponent-$signed({9'b0, exponent_parity})) >>> 1;
@@ -885,43 +893,43 @@ module FP32Elementary(
         : select_rsqrt ? -sqrt_scale
         : select_exp2 ? exp2_q : 10'sd0;
 
-    wire signed [34:0] input_exponent_q26 =
-        $signed({input_unbiased_exponent[8:0], 26'b0});
-    wire signed [34:0] log2_value_q26 = x_fraction_zero
-        ? input_exponent_q26
-        : input_exponent_q26
-            + {{6{reduced_value_q26[28]}}, reduced_value_q26};
-    wire signed [34:0] value_q26 = select_log2
-        ? log2_value_q26 : {{6{reduced_value_q26[28]}}, reduced_value_q26};
-    wire value_sign = value_q26[34];
-    wire [34:0] value_magnitude_q26 = value_sign
-        ? $unsigned(-value_q26) : $unsigned(value_q26);
+    wire signed [35:0] input_exponent_q27 =
+        $signed({input_unbiased_exponent[8:0], 27'b0});
+    wire signed [35:0] log2_value_q27 = x_fraction_zero
+        ? input_exponent_q27
+        : input_exponent_q27
+            + {{6{reduced_value_q27[29]}}, reduced_value_q27};
+    wire signed [35:0] value_q27 = select_log2
+        ? log2_value_q27 : {{6{reduced_value_q27[29]}}, reduced_value_q27};
+    wire value_sign = value_q27[35];
+    wire [35:0] value_magnitude_q27 = value_sign
+        ? $unsigned(-value_q27) : $unsigned(value_q27);
 
-    // 共通Q26 fixed-point packer。subnormal結果はFTZでsigned zeroへする。
+    // 共通Q27 fixed-point packer。subnormal結果はFTZでsigned zeroへする。
     integer leading_index;
     reg [5:0] magnitude_msb;
     always @* begin
         magnitude_msb = 6'd0;
-        for (leading_index = 0; leading_index < 35; leading_index = leading_index+1)
-            if (value_magnitude_q26[leading_index])
+        for (leading_index = 0; leading_index < 36; leading_index = leading_index+1)
+            if (value_magnitude_q27[leading_index])
                 magnitude_msb = 6'(leading_index);
     end
 
     wire signed [10:0] result_exponent_before_round =
-        $signed({5'b00000, magnitude_msb})-11'sd26
+        $signed({5'b00000, magnitude_msb})-11'sd27
         + {{1{result_scale[9]}}, result_scale};
     wire magnitude_shift_right = magnitude_msb >= 6'd23;
     wire [5:0] magnitude_shift = magnitude_shift_right
         ? magnitude_msb-6'd23 : 6'd23-magnitude_msb;
-    wire [34:0] aligned_magnitude = magnitude_shift_right
-        ? value_magnitude_q26 >> magnitude_shift
-        : value_magnitude_q26 << magnitude_shift;
+    wire [35:0] aligned_magnitude = magnitude_shift_right
+        ? value_magnitude_q27 >> magnitude_shift
+        : value_magnitude_q27 << magnitude_shift;
     wire [5:0] guard_position = magnitude_shift == 0
         ? 6'd0 : magnitude_shift-6'd1;
-    wire [34:0] sticky_mask = (35'd1 << guard_position)-35'd1;
+    wire [35:0] sticky_mask = (36'd1 << guard_position)-36'd1;
     wire guard = magnitude_shift_right & magnitude_shift != 0
-        & value_magnitude_q26[guard_position];
-    wire sticky = |(value_magnitude_q26&sticky_mask);
+        & value_magnitude_q27[guard_position];
+    wire sticky = |(value_magnitude_q27&sticky_mask);
     wire round_up = guard&(sticky|aligned_magnitude[0]);
     wire [24:0] rounded_significand = {1'b0, aligned_magnitude[23:0]}
         + {{24{1'b0}}, round_up};
@@ -936,7 +944,7 @@ module FP32Elementary(
     wire packed_sign = select_recip ? x_sign
         : select_log2 ? value_sign
         : (select_sinpi | select_cospi) ? sine_result_sign : 1'b0;
-    wire [31:0] packed_finite_result = value_magnitude_q26 == 0
+    wire [31:0] packed_finite_result = value_magnitude_q27 == 0
         | result_underflows ? {packed_sign, 31'd0}
         : result_overflows ? {packed_sign, 8'hff, 23'd0}
         : {packed_sign, result_biased_exponent, result_fraction};
