@@ -15,6 +15,12 @@ REDUCED_C0_FRACTION_BITS = 25
 C1_FRACTION_BITS = 17
 C2_FRACTION_BITS = 9
 REDUCED_C2_FRACTION_BITS = 8
+LOG2_C0_FRACTION_BITS = 25
+LOG2_C1_FRACTION_BITS = 16
+LOG2_C2_FRACTION_BITS = 7
+SINE_C0_FRACTION_BITS = 24
+SINE_C1_FRACTION_BITS = 15
+SINE_C2_FRACTION_BITS = 5
 DELTA_FRACTION_BITS = 23
 EXP2_C0_FRACTION_BITS = 27
 EXP2_DELTA_FRACTION_BITS = 24
@@ -278,43 +284,58 @@ def validate_datapath_ranges(
         half_integer+int(include_upper_endpoint),
         dtype=np.int64,
     )
-    limits = {
-        "inner_product": (-(1 << 31), (1 << 31)-1),
-        "inner_correction": (
-            -(1 << (c1_fraction_bits-5)),
-            (1 << (c1_fraction_bits-5))-1,
-        ),
-        "inner": (
-            -(1 << (c1_fraction_bits+2)),
-            (1 << (c1_fraction_bits+2))-1,
-        ),
-        "outer_product": (-(1 << 39), (1 << 39)-1),
-        "outer_correction": (
-            -(1 << (c0_fraction_bits-6)),
-            (1 << (c0_fraction_bits-6))-1,
-        ),
-        "polynomial": (
-            -(1 << (c0_fraction_bits+1)),
-            (1 << (c0_fraction_bits+1))-1,
-        ),
-    }
+    if name == "exp2":
+        limits = {
+            "inner_product": (-(1 << 31), (1 << 31)-1),
+            "inner_correction": (-(1 << 13), (1 << 13)-1),
+            "inner": (-(1 << 20), (1 << 20)-1),
+            "outer_product": (-(1 << 39), (1 << 39)-1),
+            "outer_correction": (-(1 << 21), (1 << 21)-1),
+            "polynomial": (-(1 << 28), (1 << 28)-1),
+        }
+    else:
+        limits = {
+            "inner_product": (-(1 << 31), (1 << 31)-1),
+            "inner_correction": (-(1 << 12), (1 << 12)-1),
+            "inner": (-(1 << 19), (1 << 19)-1),
+            "outer_product": (-(1 << 39), (1 << 39)-1),
+            "outer_correction": (-(1 << 19), (1 << 19)-1),
+            "polynomial": (-(1 << 26), (1 << 26)-1),
+        }
     observed = {key: [None, None] for key in limits}
 
     for c0, c1, c2, _ in rows:
         c2_q9 = c2 << (C2_FRACTION_BITS-c2_fraction_bits)
-        c1_value = c1 << (c1_fraction_bits-C1_FRACTION_BITS)
         inner_product = delta*c2_q9
-        inner_correction = round_signed_shift_array(
-            inner_product,
-            delta_fraction_bits+C2_FRACTION_BITS-c1_fraction_bits,
-        )
-        inner = c1_value+inner_correction
-        outer_product = delta*inner
-        outer_correction = round_signed_shift_array(
-            outer_product,
-            delta_fraction_bits+c1_fraction_bits-c0_fraction_bits,
-        )
-        polynomial = c0+outer_correction
+        if name == "exp2":
+            c1_value = c1 << 1
+            inner_correction = round_signed_shift_array(
+                inner_product,
+                delta_fraction_bits+C2_FRACTION_BITS-c1_fraction_bits,
+            )
+            inner = c1_value+inner_correction
+            outer_product = delta*inner
+            outer_correction = round_signed_shift_array(
+                outer_product,
+                delta_fraction_bits+c1_fraction_bits-c0_fraction_bits,
+            )
+            polynomial = c0+outer_correction
+        else:
+            c1_value = c1 << (C1_FRACTION_BITS-c1_fraction_bits)
+            inner_correction = round_signed_shift_array(
+                inner_product,
+                delta_fraction_bits+C2_FRACTION_BITS-C1_FRACTION_BITS,
+            )
+            inner = c1_value+inner_correction
+            outer_product = delta*inner
+            outer_correction = round_signed_shift_array(
+                outer_product,
+                delta_fraction_bits+C1_FRACTION_BITS
+                - REDUCED_C0_FRACTION_BITS,
+            )
+            polynomial = (
+                c0 << (REDUCED_C0_FRACTION_BITS-c0_fraction_bits)
+            )+outer_correction
         values = {
             "inner_product": inner_product,
             "inner_correction": inner_correction,
@@ -409,12 +430,20 @@ def generate_block() -> str:
     rsqrt_scaled = make_rows(
         lambda value: 1.0/math.sqrt(2.0*value), 128, 1.0/128
     )
-    log2 = make_rows(math.log2, 64, 1.0/64)
+    log2 = make_rows(
+        math.log2, 64, 1.0/64,
+        c0_fraction_bits=LOG2_C0_FRACTION_BITS,
+        c1_fraction_bits=LOG2_C1_FRACTION_BITS,
+        c2_fraction_bits=LOG2_C2_FRACTION_BITS,
+    )
     exp2 = make_exp2_rows()
     sine = make_centered_rows(
         lambda value: math.sin(math.pi*value),
         [(index+0.5)/128.0 for index in range(64)],
         1.0/256,
+        SINE_C0_FRACTION_BITS,
+        SINE_C1_FRACTION_BITS,
+        SINE_C2_FRACTION_BITS,
     )
 
     for (name, rows, half_integer, c0_fraction_bits, c2_fraction_bits,
@@ -435,14 +464,14 @@ def generate_block() -> str:
          REDUCED_C0_FRACTION_BITS, REDUCED_C2_FRACTION_BITS,
          DELTA_FRACTION_BITS, C1_FRACTION_BITS, False),
         ("log2", log2, 1 << 16,
-         REDUCED_C0_FRACTION_BITS, REDUCED_C2_FRACTION_BITS,
-         DELTA_FRACTION_BITS, C1_FRACTION_BITS, False),
+         LOG2_C0_FRACTION_BITS, LOG2_C2_FRACTION_BITS,
+         DELTA_FRACTION_BITS, LOG2_C1_FRACTION_BITS, False),
         ("exp2", exp2, 1 << 17,
          EXP2_C0_FRACTION_BITS, C2_FRACTION_BITS,
          EXP2_DELTA_FRACTION_BITS, C1_FRACTION_BITS+1, True),
         ("sine", sine, 1 << 15,
-         REDUCED_C0_FRACTION_BITS, REDUCED_C2_FRACTION_BITS,
-         DELTA_FRACTION_BITS, C1_FRACTION_BITS, False),
+         SINE_C0_FRACTION_BITS, SINE_C2_FRACTION_BITS,
+         DELTA_FRACTION_BITS, SINE_C1_FRACTION_BITS, False),
     ):
         validate_datapath_ranges(
             name, rows, half_integer, c0_fraction_bits, c2_fraction_bits,
@@ -461,12 +490,12 @@ def generate_block() -> str:
          C1_FRACTION_BITS, REDUCED_C2_FRACTION_BITS),
         ("rsqrt_scaled", rsqrt_scaled, REDUCED_C0_FRACTION_BITS,
          C1_FRACTION_BITS, REDUCED_C2_FRACTION_BITS),
-        ("log2", log2, REDUCED_C0_FRACTION_BITS,
-         C1_FRACTION_BITS, REDUCED_C2_FRACTION_BITS),
+        ("log2", log2, LOG2_C0_FRACTION_BITS,
+         LOG2_C1_FRACTION_BITS, LOG2_C2_FRACTION_BITS),
         ("exp2", exp2, EXP2_C0_FRACTION_BITS,
          C1_FRACTION_BITS, C2_FRACTION_BITS),
-        ("sine", sine, REDUCED_C0_FRACTION_BITS,
-         C1_FRACTION_BITS, REDUCED_C2_FRACTION_BITS),
+        ("sine", sine, SINE_C0_FRACTION_BITS,
+         SINE_C1_FRACTION_BITS, SINE_C2_FRACTION_BITS),
     ):
         append_tables(
             lines,
