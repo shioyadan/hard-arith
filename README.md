@@ -17,6 +17,7 @@
 | [`fp32_recip/`](fp32_recip/) | `1/x` | 結果がnormalとなる範囲でfaithful | 入出力ともFTZ | 負領域・正領域ごとに単調非増加 |
 | [`fp32_rsqrt/`](fp32_rsqrt/) | `1/sqrt(x)` | 正のnormal入力でfaithful | subnormal入力はFTZ | `+0`から`+Inf`まで単調非増加 |
 | [`fp32_elementary/`](fp32_elementary/) | `1/x`、`sqrt(x)`、`1/sqrt(x)`、`sin(pi*x)`、`cos(pi*x)`、`log2(x)`、`2^x`の選択出力 | 関数別のULP／絶対誤差条件 | 入出力ともFTZ | exp2は全入力で違反0。sqrt／rsqrtは縮約全数検査で最大1 ULPの逆行あり。詳細は各READMEを参照 |
+| [`fp32_exp_recip_rsqrt/`](fp32_exp_recip_rsqrt/) | `exp(x)`、`1/x`、`1/sqrt(x)`の選択出力 | normal結果でRNE参照値から最大1 ULP | 入出力ともFTZ | 各演算の定義域で保持 |
 
 faithfulは、無限精度の値を挟む二つのbinary32値のどちらかを返すことを意味します。
 単調非減少では入力を増やしたときに出力が減らず、単調非増加では出力が増えません。
@@ -64,6 +65,12 @@ make lint-fp32_elementary
 make test-fp32_elementary
 make exhaustive-fp32_elementary EXHAUSTIVE_THREADS=22
 make constants-check-fp32_elementary
+make lint-fp32_exp_recip_rsqrt
+make test-fp32_exp_recip_rsqrt
+make exhaustive-active-fp32_exp_recip_rsqrt
+make exhaustive-fp32_exp_recip_rsqrt
+make monotonic-fp32_exp_recip_rsqrt
+make constants-check-fp32_exp_recip_rsqrt
 ```
 
 ## Dev container
