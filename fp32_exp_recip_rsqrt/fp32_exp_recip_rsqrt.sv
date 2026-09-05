@@ -37,45 +37,10 @@ module FP32ExpRecipRsqrt(
         27'd122836952, 27'd125636092, 27'd128465716, 27'd131326154 // 60 .. 63
     };
 
-    localparam [2:0] exp_c1_q17_prefix = 3'b001;
-    localparam [16:0] exp_c1_q17_suffix [0:63] = '{
-        17'd1, 17'd1428, 17'd2871, 17'd4329, // 0 .. 3
-        17'd5804, 17'd7294, 17'd8801, 17'd10324, // 4 .. 7
-        17'd11864, 17'd13420, 17'd14994, 17'd16584, // 8 .. 11
-        17'd18192, 17'd19817, 17'd21460, 17'd23121, // 12 .. 15
-        17'd24800, 17'd26498, 17'd28214, 17'd29948, // 16 .. 19
-        17'd31702, 17'd33474, 17'd35266, 17'd37077, // 20 .. 23
-        17'd38908, 17'd40759, 17'd42630, 17'd44522, // 24 .. 27
-        17'd46434, 17'd48367, 17'd50321, 17'd52296, // 28 .. 31
-        17'd54293, 17'd56311, 17'd58352, 17'd60414, // 32 .. 35
-        17'd62499, 17'd64607, 17'd66738, 17'd68892, // 36 .. 39
-        17'd71070, 17'd73271, 17'd75496, 17'd77745, // 40 .. 43
-        17'd80019, 17'd82318, 17'd84641, 17'd86990, // 44 .. 47
-        17'd89365, 17'd91765, 17'd94192, 17'd96645, // 48 .. 51
-        17'd99124, 17'd101631, 17'd104165, 17'd106727, // 52 .. 55
-        17'd109316, 17'd111934, 17'd114580, 17'd117255, // 56 .. 59
-        17'd119959, 17'd122693, 17'd125456, 17'd128249 // 60 .. 63
-    };
-
-    localparam [4:0] exp_c2_q9_prefix = 5'b00001;
-    localparam [7:0] exp_c2_q9_suffix [0:63] = '{
-        8'd0, 8'd3, 8'd6, 8'd8, // 0 .. 3
-        8'd11, 8'd14, 8'd17, 8'd20, // 4 .. 7
-        8'd23, 8'd26, 8'd29, 8'd32, // 8 .. 11
-        8'd36, 8'd39, 8'd42, 8'd45, // 12 .. 15
-        8'd49, 8'd52, 8'd55, 8'd58, // 16 .. 19
-        8'd62, 8'd65, 8'd69, 8'd72, // 20 .. 23
-        8'd76, 8'd80, 8'd83, 8'd87, // 24 .. 27
-        8'd91, 8'd94, 8'd98, 8'd102, // 28 .. 31
-        8'd106, 8'd110, 8'd114, 8'd118, // 32 .. 35
-        8'd122, 8'd126, 8'd130, 8'd135, // 36 .. 39
-        8'd139, 8'd143, 8'd148, 8'd152, // 40 .. 43
-        8'd156, 8'd161, 8'd165, 8'd170, // 44 .. 47
-        8'd175, 8'd179, 8'd184, 8'd189, // 48 .. 51
-        8'd193, 8'd198, 8'd203, 8'd208, // 52 .. 55
-        8'd213, 8'd219, 8'd224, 8'd229, // 56 .. 59
-        8'd234, 8'd240, 8'd245, 8'd250 // 60 .. 63
-    };
+    // expのC1/C2はC0の上位と小さい補正から正確に再構成する。
+    // 各maskのbit jは、table index jで補正を1段増やすことを表す。
+    localparam [63:0] exp_c1_epsilon2_mask = 64'h7e8d270578140400;
+    localparam [63:0] exp_c2_epsilon1_mask = 64'h260dad8e1b537006;
 
     localparam [2:0] reciprocal_c0_q25_prefix = 3'b001;
     localparam [23:0] reciprocal_c0_q25_suffix [0:127] = '{
@@ -149,7 +114,6 @@ module FP32ExpRecipRsqrt(
         17'd97389, 17'd97654, 17'd97916, 17'd98176 // 124 .. 127
     };
 
-    localparam [3:0] reciprocal_c2_q8_prefix = 4'b0000;
     localparam [7:0] reciprocal_c2_q8_suffix [0:127] = '{
         8'd253, 8'd247, 8'd241, 8'd236, // 0 .. 3
         8'd231, 8'd226, 8'd221, 8'd216, // 4 .. 7
@@ -257,7 +221,6 @@ module FP32ExpRecipRsqrt(
         16'd41882, 16'd42022, 16'd42160, 16'd42297 // 124 .. 127
     };
 
-    localparam [4:0] rsqrt_base_c2_q8_prefix = 5'b00000;
     localparam [6:0] rsqrt_base_c2_q8_suffix [0:127] = '{
         7'd95, 7'd93, 7'd91, 7'd90, // 0 .. 3
         7'd88, 7'd86, 7'd85, 7'd83, // 4 .. 7
@@ -365,7 +328,6 @@ module FP32ExpRecipRsqrt(
         16'd48810, 16'd48909, 16'd49007, 16'd49104 // 124 .. 127
     };
 
-    localparam [4:0] rsqrt_scaled_c2_q8_prefix = 5'b00000;
     localparam [6:0] rsqrt_scaled_c2_q8_suffix [0:127] = '{
         7'd67, 7'd66, 7'd65, 7'd63, // 0 .. 3
         7'd62, 7'd61, 7'd60, 7'd59, // 4 .. 7
@@ -449,39 +411,50 @@ module FP32ExpRecipRsqrt(
 
     wire signed [22:0] exp_r_biased_q28 =
         $signed({exp_linear_r_q28[21], exp_linear_r_q28})+23'sd8;
-    wire signed [18:0] exp_delta_q24 = exp_r_biased_q28[22:4];
+    // active入力ではbit 22がbit 21の符号拡張なので、Q24残差は18 bitで足りる。
+    wire signed [17:0] exp_delta_q24 = exp_r_biased_q28[21:4];
 
     // FP32Elementaryを基準に、Q27/Q18/Q9の二次Hornerへ三機能を揃える。
     wire [6:0] mantissa_index_m7 = x_fraction[22:16];
     wire signed [16:0] mantissa_delta_m7_q23 =
         $signed({1'b0, x_fraction[15:0]})-17'sd32768;
-    wire signed [18:0] polynomial_delta_q24 = select_exp
+    wire signed [17:0] polynomial_delta_q24 = select_exp
         ? exp_delta_q24
-        : $signed({mantissa_delta_m7_q23[16],
-                   mantissa_delta_m7_q23, 1'b0});
+        : $signed({mantissa_delta_m7_q23, 1'b0});
 
     wire signed [28:0] exp_c0_q27_value = $signed({
         exp_c0_q27_prefix, exp_c0_q27_suffix[exp_table_index]
     });
-    wire signed [20:0] exp_c1_q18_value = $signed({
-        exp_c1_q17_prefix, exp_c1_q17_suffix[exp_table_index], 1'b0
+    // C1=(C0>>10)+(1または2)、C2=(C0>>19)+(0または1)。
+    // 下位5 bitの加算carryはbit 5で止まり、bit 6以上はC0から直結できる。
+    wire [5:0] exp_c1_low_sum =
+        {1'b0, exp_c0_q27_value[14:10]}
+        + (exp_c1_epsilon2_mask[exp_table_index] ? 6'd2 : 6'd1);
+    wire signed [19:0] exp_c1_q18_value = $signed({
+        1'b0, exp_c0_q27_value[27:16],
+        exp_c0_q27_value[15] | exp_c1_low_sum[5],
+        exp_c1_low_sum[4:0], 1'b0
     });
-    wire signed [12:0] exp_c2_q9_value = $signed({
-        exp_c2_q9_prefix, exp_c2_q9_suffix[exp_table_index]
-    });
+    wire [5:0] exp_c2_low_sum =
+        {1'b0, exp_c0_q27_value[23:19]}
+        + (exp_c2_epsilon1_mask[exp_table_index] ? 6'd1 : 6'd0);
+    wire [8:0] exp_c2_q9_value = {
+        exp_c0_q27_value[27:25],
+        exp_c0_q27_value[24] | exp_c2_low_sum[5],
+        exp_c2_low_sum[4:0]
+    };
 
     wire signed [28:0] reciprocal_c0_q27_value = $signed({
         reciprocal_c0_q25_prefix,
         reciprocal_c0_q25_suffix[mantissa_index_m7], 2'b0
     });
-    wire signed [20:0] reciprocal_c1_q18_value = $signed({
-        reciprocal_c1_q17_prefix,
+    wire signed [19:0] reciprocal_c1_q18_value = $signed({
+        reciprocal_c1_q17_prefix[1:0],
         reciprocal_c1_q17_suffix[mantissa_index_m7], 1'b0
     });
-    wire signed [12:0] reciprocal_c2_q9_value = $signed({
-        reciprocal_c2_q8_prefix,
+    wire [8:0] reciprocal_c2_q9_value = {
         reciprocal_c2_q8_suffix[mantissa_index_m7], 1'b0
-    });
+    };
     wire signed [28:0] rsqrt_c0_q27_value = exponent_parity ? $signed({
         rsqrt_scaled_c0_q25_prefix,
         rsqrt_scaled_c0_q25_suffix[mantissa_index_m7], 2'b0
@@ -489,42 +462,42 @@ module FP32ExpRecipRsqrt(
         rsqrt_base_c0_q25_prefix,
         rsqrt_base_c0_q25_suffix[mantissa_index_m7], 2'b0
     });
-    wire signed [20:0] rsqrt_c1_q18_value = exponent_parity ? $signed({
-        rsqrt_scaled_c1_q17_prefix,
+    wire signed [19:0] rsqrt_c1_q18_value = exponent_parity ? $signed({
+        rsqrt_scaled_c1_q17_prefix[2:0],
         rsqrt_scaled_c1_q17_suffix[mantissa_index_m7], 1'b0
     }) : $signed({
-        rsqrt_base_c1_q17_prefix,
+        rsqrt_base_c1_q17_prefix[2:0],
         rsqrt_base_c1_q17_suffix[mantissa_index_m7], 1'b0
     });
-    wire signed [12:0] rsqrt_c2_q9_value = exponent_parity ? $signed({
-        rsqrt_scaled_c2_q8_prefix,
+    wire [8:0] rsqrt_c2_q9_value = exponent_parity ? {
+        1'b0,
         rsqrt_scaled_c2_q8_suffix[mantissa_index_m7], 1'b0
-    }) : $signed({
-        rsqrt_base_c2_q8_prefix,
+    } : {
+        1'b0,
         rsqrt_base_c2_q8_suffix[mantissa_index_m7], 1'b0
-    });
+    };
 
     wire signed [28:0] coefficient_c0_q27 = select_exp
         ? exp_c0_q27_value
         : select_recip ? reciprocal_c0_q27_value : rsqrt_c0_q27_value;
-    wire signed [20:0] coefficient_c1_q18 = select_exp
+    wire signed [19:0] coefficient_c1_q18 = select_exp
         ? exp_c1_q18_value
         : select_recip ? reciprocal_c1_q18_value : rsqrt_c1_q18_value;
-    wire signed [12:0] coefficient_c2_q9 = select_exp
+    wire [8:0] coefficient_c2_q9 = select_exp
         ? exp_c2_q9_value
         : select_recip ? reciprocal_c2_q9_value : rsqrt_c2_q9_value;
 
-    wire signed [31:0] inner_product_q33 =
-        polynomial_delta_q24*coefficient_c2_q9;
-    wire signed [32:0] inner_product_biased_q33 =
-        $signed({inner_product_q33[31], inner_product_q33})+33'sd32768;
+    wire signed [27:0] inner_product_q33 =
+        polynomial_delta_q24*$signed({1'b0, coefficient_c2_q9});
+    wire signed [28:0] inner_product_biased_q33 =
+        $signed({inner_product_q33[27], inner_product_q33})+29'sd32768;
     wire signed [13:0] inner_correction_q18 =
         inner_product_biased_q33[28:15];
-    wire signed [20:0] inner_q18 = coefficient_c1_q18
-        + {{7{inner_correction_q18[13]}}, inner_correction_q18};
-    wire signed [39:0] outer_product_q42 = polynomial_delta_q24*inner_q18;
-    wire signed [40:0] outer_product_biased_q42 =
-        $signed({outer_product_q42[39], outer_product_q42})+41'sd16384;
+    wire signed [19:0] inner_q18 = coefficient_c1_q18
+        + {{6{inner_correction_q18[13]}}, inner_correction_q18};
+    wire signed [37:0] outer_product_q42 = polynomial_delta_q24*inner_q18;
+    wire signed [38:0] outer_product_biased_q42 =
+        $signed({outer_product_q42[37], outer_product_q42})+39'sd16384;
     wire signed [21:0] outer_correction_q27 =
         outer_product_biased_q42[36:15];
     wire signed [28:0] polynomial_q27 = coefficient_c0_q27

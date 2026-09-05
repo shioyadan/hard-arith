@@ -10,7 +10,7 @@ IEEE 754 binary32のbit patternと演算選択を入力し、自然指数関数`
 - subnormal: 入出力ともFTZ
 - 精度: normal結果はRNE参照値から最大1 ULP
 - 単調性: 各演算の非NaNな定義域内で保持
-- 共有datapath: signed 19 x 13 bitとsigned 19 x 21 bitの乗算を各1個
+- 共有datapath: signed 18 x unsigned 9 bitとsigned 18 x signed 20 bitの乗算を各1個
 
 ## ファイル構成
 
@@ -244,13 +244,18 @@ x, op
                                                 result
 ```
 
-`exp`のC0/C1/C2はQ27/Q17/Q9で格納し、C1を演算時にQ18へ揃えます。Q27から
-Q24への出力切り詰めに必要な丸めbiasはC0へ織り込み、独立した丸め加算器を
-置きません。table境界で精度または単調性が厳しい6区間だけC0を調整しています。
+`exp`ではC0だけを64行のQ27 tableに格納します。元のQ17のC1は
+`(C0 >> 10)+(1または2)`、Q9のC2は`(C0 >> 19)+(0または1)`で正確に表せるため、
+補正値を示す64-bit maskを各1本だけ保持し、C1/C2のtableは置きません。C1は
+演算時にQ18へ揃えます。Q27からQ24への出力切り詰めに必要な丸めbiasはC0へ
+織り込み、独立した丸め加算器を置きません。table境界で精度または単調性が
+厳しい6区間だけC0を調整しています。
 
 根系には`FP32Elementary`と同じQ25/Q17/Q8係数を使います。読み出し時に下位zeroを
-追加し、C0=Q27、C1=Q18、C2=Q9、差分=Q24の共通形式へ揃えます。共有乗算器は
-signed 19 x 13 bitとsigned 19 x 21 bitを各1個です。
+追加し、C0=Q27、C1=Q18、C2=Q9、差分=Q24の共通形式へ揃えます。到達範囲を
+全table行で検査した上で、差分はsigned 18 bit、C1はsigned 20 bit、C2は
+unsigned 9 bitに絞っています。共有乗算器はsigned 18 x unsigned 9 bitと
+signed 18 x signed 20 bitを各1個です。
 
 #### 固定小数点形式
 
@@ -258,15 +263,17 @@ signed 19 x 13 bitとsigned 19 x 21 bitを各1個です。
 
 | 信号・係数 | 格納形式 | 演算時の形式 | 役割 |
 |---|---:|---:|---|
-| exp `C0/C1/C2` | Q27 / Q17 / Q9 | Q27 / Q18 / Q9 | `2^(j/64)*exp(r)`の近似 |
+| exp `C0/C1/C2` | C0: Q27、C1/C2: C0とmaskから再構成 | Q27 / Q18 / Q9 | `2^(j/64)*exp(r)`の近似 |
 | reciprocal `C0/C1/C2` | Q25 / Q17 / Q8 | Q27 / Q18 / Q9 | `1/m`の近似 |
 | rsqrt `C0/C1/C2` | Q25 / Q17 / Q8 | Q27 / Q18 / Q9 | 偶奇別の逆平方根近似 |
 | exp残差 | signed Q24 | signed Q24 | `ln(2)/64`格子からの位置 |
 | root残差 | signed Q23 | signed Q24 | 128分割区間中心からの位置 |
 | 近似結果 | Q27 | Q27 | 正規化前の仮数関数値 |
 
-各係数bankの全行に共通する上位bitはprefixとして一度だけ保持し、行ごとのsuffixだけを
-tableへ格納します。省いた下位bitは読み出し時にzeroとして復元します。
+根系の各係数bankでは、全行に共通する上位bitをprefixとして一度だけ保持し、
+行ごとのsuffixだけをtableへ格納します。省いた下位bitは読み出し時にzeroとして
+復元します。expではさらにC1/C2の相関を利用し、二つの係数tableをC0直結bitと
+128 bitの補正maskへ置き換えています。
 
 `1/m`と`1/sqrt(m)`の近似値が常に`[0.5,1.0]`へ入ることを利用し、一般の
 leading-zero detectorや可変正規化shifterを置かず、Q27の上位二位置だけから
@@ -274,8 +281,10 @@ binary32仮数を生成します。
 
 ## 定数とテーブルの照合
 
-`tools/gen_constants.py`は64行のexp係数を再生成し、根系については
-`FP32Elementary`の係数と照合して、RTLのprefix／suffix tableを検査します。
+`tools/gen_constants.py`は64行のexp係数を再生成し、C1/C2がC0と補正maskから
+正確に復元できることを検査します。根系については`FP32Elementary`の係数と
+照合します。また、各関数の全table行と到達し得る全残差について中間値を列挙し、
+共有datapathの宣言幅に収まることも検査します。
 
 ```sh
 make constants-check
