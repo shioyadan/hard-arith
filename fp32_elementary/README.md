@@ -139,6 +139,10 @@ make test-fp32_elementary RANDOM_CYCLES=1000000 MONOTONIC_SAMPLES=1000000
 検査した後、exp2の全`2^32` bit patternを列挙します。途中で違反を検出しても
 全走査を完了し、最後に失敗を返します。網羅範囲と参照値の作り方は次節に示します。
 
+現在はsqrtとrsqrtの隣接単調性違反が合否に含まれるため、`make exhaustive`と
+`make exhaustive-reduced`は失敗を返します。各関数の精度違反は0、exp2単独の全入力検査は
+`pass=1`ですが、縮約検査全体は`pass=0`です。sinpi/cospiの単調性は診断値として扱います。
+
 短い確認には`make exhaustive-reduced`、exp2の近似本体だけの確認には
 `make exhaustive-active`を使用できます。22 threadでの直近の確認では、exp2の全入力走査は
 約45秒でした。buildと通常testを含めても約1分で完了します。
