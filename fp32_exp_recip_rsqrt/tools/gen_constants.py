@@ -183,7 +183,8 @@ def validate_shared_datapath(exp_rows, elementary_text: str) -> None:
     ]
     for name, rows, delta_minimum, delta_maximum in banks:
         delta = np.arange(
-            delta_minimum, delta_maximum+1, dtype=np.int64
+            delta_minimum, delta_maximum+1,
+            1 if name == "exp" else 2, dtype=np.int64
         )
         require_range(f"{name} delta", delta, 18)
         for index, (c0, c1, c2) in enumerate(rows):
@@ -210,6 +211,42 @@ def validate_shared_datapath(exp_rows, elementary_text: str) -> None:
                 f"{name} outer correction row {index}", outer_correction, 22
             )
             require_range(f"{name} polynomial row {index}", polynomial, 29)
+
+            # C0加算と最終丸めを、低位判定と上位25-bit加算へ統合できるか確認する。
+            high_sum = (c0 >> 3)+(outer_correction >> 3)
+            low_sum = (c0 & 7)+(outer_correction & 7)
+            if name == "exp":
+                carry = low_sum >= 8
+                expected_mantissa = polynomial >> 3
+            else:
+                if c0 & 3:
+                    raise SystemExit(
+                        f"{name} C0 row {index}の下位2 bitがzeroではありません"
+                    )
+                carry = (low_sum > 4) | ((low_sum == 4) & ((high_sum & 1) != 0))
+                expected_mantissa = (polynomial >> 3)+(
+                    ((polynomial & 7) > 4)
+                    | (((polynomial & 7) == 4) & (((polynomial >> 3) & 1) != 0))
+                )
+                # recipのm=1とrsqrt baseのm=1だけは厳密点bypassへ回る。
+                start = int(
+                    index == 0 and name in ("reciprocal", "rsqrt_base")
+                )
+                normal_polynomial = polynomial[start:]
+                normal_mantissa = expected_mantissa[start:]
+                if (np.any(normal_polynomial < (1 << 26))
+                        or np.any(normal_polynomial >= (1 << 27))):
+                    raise SystemExit(f"{name} row {index}で固定正規化範囲を外れます")
+                if (np.any(normal_mantissa < (1 << 23))
+                        or np.any(normal_mantissa >= (1 << 24))):
+                    raise SystemExit(f"{name} row {index}で丸め後の正規化位置が変わります")
+            packed_mantissa = high_sum+carry
+            require_range(
+                f"{name} packed mantissa row {index}",
+                packed_mantissa, 25, signed=False,
+            )
+            if not np.array_equal(packed_mantissa, expected_mantissa):
+                raise SystemExit(f"{name} row {index}で加算と最終丸めの統合結果が変わります")
 
 
 def generate_coefficient_block() -> str:

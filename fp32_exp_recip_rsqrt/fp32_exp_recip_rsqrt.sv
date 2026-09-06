@@ -377,8 +377,6 @@ module FP32ExpRecipRsqrt(
     wire x_fraction_zero = x_fraction == 0;
     wire x_is_nan = x_exponent_all_one & ~x_fraction_zero;
     wire x_is_inf = x_exponent_all_one & x_fraction_zero;
-    wire signed [9:0] input_unbiased_exponent =
-        $signed({2'b00, x_exponent})-10'sd127;
     wire exponent_parity = ~x_exponent[0];
 
     // FP32Expと同じ縮小した定数乗算とmodulo残差を使う。
@@ -500,54 +498,36 @@ module FP32ExpRecipRsqrt(
         $signed({outer_product_q42[37], outer_product_q42})+39'sd16384;
     wire signed [21:0] outer_correction_q27 =
         outer_product_biased_q42[36:15];
-    wire signed [28:0] polynomial_q27 = coefficient_c0_q27
-        + {{7{outer_correction_q27[21]}}, outer_correction_q27};
+    // 低位のcarryとRNEを先に決め、C0加算と最終丸めを一つにする。
+    // rootのC0下位2 bitはzeroなので、二つのcarryは同時に発生しない。
+    wire [3:0] pack_low_sum = {1'b0, coefficient_c0_q27[2:0]}
+        + {1'b0, outer_correction_q27[2:0]};
+    wire root_pack_carry = (pack_low_sum > 4'd4)
+        | ((pack_low_sum == 4'd4)
+           & (coefficient_c0_q27[3] ^ outer_correction_q27[3]));
+    wire pack_carry = select_exp ? pack_low_sum[3] : root_pack_carry;
+    // 外側補正はsigned。上位和はmodulo 2^25で扱い、下位25 bitを保持する。
+    wire [24:0] polynomial_mant_q24 = coefficient_c0_q27[27:3]
+        + {{6{outer_correction_q27[21]}}, outer_correction_q27[21:3]}
+        + {24'b0, pack_carry};
+    wire [24:0] exp_mant = polynomial_mant_q24;
 
-    wire [27:0] exp_mant_q27 = polynomial_q27[27:0];
-    wire [24:0] exp_mant = exp_mant_q27[27:3];
-
-    // reciprocalとrsqrtの厳密な二のべき格子点をbypassする。
+    // 厳密点だけ最終fractionをzeroとし、指数を1段補正する。
     wire root_exact = (select_recip & x_fraction_zero)
         | (select_rsqrt & x_fraction_zero & ~exponent_parity);
-    wire signed [29:0] root_value_q27 = root_exact
-        ? 30'sd134217728
-        : $signed({polynomial_q27[28], polynomial_q27});
-    wire signed [9:0] root_sqrt_scale =
-        (input_unbiased_exponent-$signed({9'b0, exponent_parity})) >>> 1;
-    wire signed [9:0] root_result_scale = select_recip
-        ? -input_unbiased_exponent : -root_sqrt_scale;
-
-    // 1/mと1/sqrt(m)は常に[0.5, 1.0]なので、一般LZDを使わず
-    // Q27のbit 27/26だけで正規化位置を選ぶ。
-    wire [27:0] root_magnitude_q27 = root_value_q27[27:0];
-    wire root_at_least_one = root_magnitude_q27[27];
-    wire [23:0] root_aligned = root_at_least_one
-        ? root_magnitude_q27[27:4] : root_magnitude_q27[26:3];
-    wire root_guard = root_at_least_one
-        ? root_magnitude_q27[3] : root_magnitude_q27[2];
-    wire root_sticky = root_at_least_one
-        ? |root_magnitude_q27[2:0] : |root_magnitude_q27[1:0];
-    wire root_round_up = root_guard&(root_sticky|root_aligned[0]);
-    wire [24:0] root_rounded_significand =
-        {1'b0, root_aligned}+{{24{1'b0}}, root_round_up};
-    wire root_significand_carry = root_rounded_significand[24];
-    wire signed [10:0] root_exponent_before_round =
-        {{1{root_result_scale[9]}}, root_result_scale}
-        - $signed({10'b0, ~root_at_least_one});
-    wire signed [10:0] root_result_exponent = root_exponent_before_round
-        + $signed({10'b0, root_significand_carry});
-    wire [22:0] root_result_fraction = root_significand_carry
-        ? root_rounded_significand[23:1] : root_rounded_significand[22:0];
-    wire [7:0] root_result_biased_exponent =
-        8'(root_result_exponent+11'sd127);
-    wire root_underflows = root_result_exponent < -11'sd126;
-    wire root_overflows = root_result_exponent > 11'sd127;
+    wire [22:0] root_result_fraction = root_exact ? 23'd0 : polynomial_mant_q24[22:0];
+    // biased指数を直接計算し、仮数経路からのcarry待ちをなくす。
+    wire [7:0] root_scale_operand = select_recip
+        ? x_exponent : {1'b0, x_exponent[7:1]};
+    wire [7:0] root_scale_base = select_recip ? 8'd253 : 8'd189;
+    wire [7:0] root_result_biased_exponent = root_scale_base-root_scale_operand
+        + {7'b0, root_exact} + {7'b0, (select_rsqrt & exponent_parity)};
+    wire root_underflows = select_recip
+        & ((x_exponent == 8'd254) | ((x_exponent == 8'd253) & ~root_exact));
     wire [31:0] root_packed_finite = root_underflows
         ? {(select_recip ? x_sign : 1'b0), 31'd0}
-        : root_overflows
-            ? {(select_recip ? x_sign : 1'b0), 8'hff, 23'd0}
-            : {(select_recip ? x_sign : 1'b0),
-               root_result_biased_exponent, root_result_fraction};
+        : {(select_recip ? x_sign : 1'b0),
+           root_result_biased_exponent, root_result_fraction};
 
     wire [31:0] reciprocal_result = x_is_inf ? {x_sign, 31'd0}
         : x_exponent_zero ? {x_sign, 8'hff, 23'd0} : root_packed_finite;
