@@ -69,6 +69,9 @@ class IntegerModelTests(unittest.TestCase):
 
         rtl = generate()
         self.assertIn("input wire is_bf16", rtl)
+        self.assertIn("parameter integer FORMAT_MODE = 0", rtl)
+        self.assertIn("wire use_bf16 = (FORMAT_MODE == 2) || ((FORMAT_MODE == 0) && is_bf16);", rtl)
+        self.assertNotIn("is_bf16", rtl.split("wire use_bf16 =", 1)[1].split(";", 1)[1])
         self.assertEqual(rtl.count("module FP16BF16ExpRecipRsqrtStudy"), 1)
         self.assertEqual(rtl.count(" * "), 2)
         self.assertIn("wire signed [19:0] product = d * c1;", rtl)

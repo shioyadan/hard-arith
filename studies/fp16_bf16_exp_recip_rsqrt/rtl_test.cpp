@@ -6,6 +6,8 @@
 #include <cstdio>
 #include <vector>
 
+static_assert(FORMAT_MODE >= 0 && FORMAT_MODE <= 2, "unsupported FORMAT_MODE");
+
 static bool read_vectors(const char *path, std::vector<uint16_t> &values) {
     FILE *input = std::fopen(path, "rb");
     if (!input) return false;
@@ -35,7 +37,8 @@ int main(int argc, char **argv) {
             const bool legal = op == 1 || op == 2 || op == 4;
             for (unsigned format = 0; format < 2; ++format) {
                 dut.is_bf16 = format;
-                const unsigned model = legal ? expected[format][oi*65536+x] : format ? 0x7fc0 : 0x7e00;
+                const unsigned selected = FORMAT_MODE == 0 ? format : FORMAT_MODE - 1;
+                const unsigned model = legal ? expected[selected][oi*65536+x] : selected ? 0x7fc0 : 0x7e00;
                 dut.eval();
                 if (dut.result != model) {
                     std::printf("FAIL: bf16=%u op=%u x=%04x result=%04x model=%04x\n",
@@ -46,4 +49,5 @@ int main(int argc, char **argv) {
         }
     }
     std::puts("PASS: legal=393216 invalid=655360 total=1048576 bit-exact vectors; format alternates every evaluation");
+    std::printf("FORMAT_MODE=%d: is_bf16 input %s\n", FORMAT_MODE, FORMAT_MODE ? "ignored" : "selected");
 }
