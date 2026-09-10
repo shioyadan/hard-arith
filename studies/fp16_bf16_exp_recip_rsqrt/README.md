@@ -5,7 +5,8 @@ FP16／BF16のexp、reciprocal、rsqrtを、共通の区分一次近似で計算
 
 - 三機能は `exp(x)`、`1/x`、`1/sqrt(x)`。
 - 入出力は16 bit。形式は `is_bf16`、演算は3-bit one-hotの `op` で指定。
-- 入出力はFTZ。normal結果は、対象形式へ最近接偶数丸めした参照値から最大1 step。
+- 入出力subnormalに対応。有限の非zero結果は、対象形式へ最近接偶数丸めした参照値から最大1 step。
+- `SUPPORT_SUBNORMAL=0` で従来の入出力FTZに切り替え可能。
 - expは単調非減少、reciprocalは正負の各領域で単調非増加、rsqrtは正領域で単調非増加。
 - `FORMAT_MODE` パラメータでFP16専用・BF16専用にも設定可能。
 
@@ -18,7 +19,7 @@ fp16_bf16_exp_recip_rsqrt/
 ├── gen_rtl.py      # 係数表と共有RTLの生成
 ├── study.py        # 範囲縮小・中間丸めを含む整数モデル
 ├── reference.cpp   # 独立したbinary128参照値の生成
-├── rtl_test.cpp    # 三つのFORMAT_MODEのRTL検査
+├── rtl_test.cpp    # 形式設定とsubnormal設定のRTL検査
 ├── test_study.py   # 精度・単調性・値域・丸めの検査
 └── rtl/
     └── fp16.sv     # 合成対象の共有RTL
@@ -31,7 +32,8 @@ fp16_bf16_exp_recip_rsqrt/
 
 ```systemverilog
 module FP16BF16ExpRecipRsqrtStudy #(
-    parameter integer FORMAT_MODE = 0
+    parameter integer FORMAT_MODE = 0,
+    parameter bit SUPPORT_SUBNORMAL = 1'b1
 ) (
     input wire [15:0] x,
     input wire [2:0] op,
@@ -66,6 +68,8 @@ FP16BF16ExpRecipRsqrtStudy #(.FORMAT_MODE(2)) u_arith (
 ```
 
 専用設定でもポート構成は同じです。0、1、2以外の `FORMAT_MODE` はサポートしません。
+`SUPPORT_SUBNORMAL` は合成時の設定です。既定の1では両形式の入出力subnormalを扱い、
+0では従来通り入出力FTZとします。実行時の切替入力は追加しません。
 
 ## 数値仕様
 
@@ -76,29 +80,34 @@ FP16BF16ExpRecipRsqrtStudy #(.FORMAT_MODE(2)) u_arith (
 | +Inf | `16'h7c00` | `16'h7f80` |
 | canonical quiet NaN | `16'h7e00` | `16'h7fc0` |
 
-入力subnormalは符号付きzeroとして扱います。出力は対象形式へ最近接偶数丸め
-（RNE: round to nearest, ties to even）した後、subnormalを符号付きzeroへflushします。
+既定では入力subnormalを非zeroの値として扱い、出力subnormalも保持します。
+出力丸めは最近接偶数丸め（RNE: round to nearest, ties to even）を使用します。
+`SUPPORT_SUBNORMAL=0` では入力subnormalを符号付きzeroとして扱い、
+出力を対象形式へRNEした後でsubnormalを符号付きzeroへflushします。
 NaNの符号とpayloadは保持しません。
 
 | 入力 | exp | reciprocal | rsqrt |
 |---|---|---|---|
 | NaN | canonical qNaN | canonical qNaN | canonical qNaN |
-| ±0、±subnormal | 1 | ±Inf | ±Inf |
+| ±0 | 1 | ±Inf | ±Inf |
+| 正のsubnormal | 1 | 正の逆数近似値（overflow時は+Inf） | 正の逆数平方根近似値 |
+| 負のsubnormal | 1 | 負の逆数近似値（overflow時は−Inf） | canonical qNaN |
 | +Inf | +Inf | +0 | +0 |
 | −Inf | +0 | −0 | canonical qNaN |
 | 負のnormal | 正のexp近似値 | 負の逆数近似値 | canonical qNaN |
 
-normal結果の誤差は、独立した高精度計算を対象形式へRNEした参照値との
+有限の非zero結果（normalとsubnormal）の誤差は、独立した高精度計算を対象形式へRNEした参照値との
 **表現可能な値の間隔で最大1 step**です。正しく丸めた結果そのものや、
 真値を挟む隣接二値のいずれかを返すfaithful roundingは要求しません。
-参照値または出力がnormalでない場合や符号が異なる場合は、参照値とbit一致させます。
+参照値または出力がzero・Inf・NaNの場合や符号が異なる場合は、参照値とbit一致させます。
 このため、最大1 stepという条件によって、zeroやInfへの誤った遷移を許容しません。
+FTZ設定の参照値には同じ入出力FTZを適用し、従来のnormal結果最大1 stepを維持します。
 
 単調性は、丸めによって同じ出力が続くことを許す条件です。
 expは入力が増えても出力が減らない「単調非減少」、
 reciprocalとrsqrtは入力が増えても出力が増えない「単調非増加」とします。
 reciprocalは零点をまたがず、負領域と正領域を別々に検査します。
-rsqrtは `+0～+Inf` を対象とし、負のzero／subnormalの特殊値処理とは区別します。
+rsqrtは `+0～+Inf` を対象とし、負入力の特殊値処理とは区別します。
 
 ## 必要なツール
 
@@ -122,14 +131,17 @@ make test
 make rtl-check
 make rtl-lint
 
-# 実行時形式切替のRTLを全数検査
+# 実行時形式切替・subnormal対応のRTLを全数検査
 make rtl-test
 
 # FP16専用、BF16専用をそれぞれ全数検査
 make rtl-test FORMAT_MODE=1
 make rtl-test FORMAT_MODE=2
 
-# モデル検査と三設定のRTL全数検査をまとめて実行
+# 従来のFTZ設定を全数検査
+make rtl-test SUPPORT_SUBNORMAL=0
+
+# モデル検査と形式3設定×subnormal 2設定のRTL全数検査
 make rtl-test-all
 ```
 
@@ -145,6 +157,8 @@ FP32やdoubleを中継せず対象形式へ直接RNEします。
 
 ## 検証済み精度
 
+以下はsubnormal対応・FTZの両設定で確認した結果です。
+
 | 形式 | 演算 | 入力数 | 最大RNE step | 精度違反 | 単調性違反 |
 |---|---|---:|---:|---:|---:|
 | FP16 | exp | 65,536 | 1 | 0 | 0 |
@@ -154,8 +168,9 @@ FP32やdoubleを中継せず対象形式へ直接RNEします。
 | BF16 | reciprocal | 65,536 | 1 | 0 | 0 |
 | BF16 | rsqrt | 65,536 | 1 | 0 | 0 |
 
-特殊値、FTZ、overflow境界も全入力精度検査に含みます。
-RTLは三つの `FORMAT_MODE` で合計3,145,728組のbit一致を確認しています。
+特殊値、subnormal、FTZ、overflow境界も全入力精度検査に含みます。
+RTLは三つの `FORMAT_MODE` と二つの `SUPPORT_SUBNORMAL` で合計6,291,456組のbit一致を確認しています。
+FTZ設定は対応追加前の全入力期待値ともbit一致します。
 また、正規化を固定できる値域と丸め条件を検査し、全指数とunderflow／overflow境界を
 含めて汎用packとの一致を確認しています。これらは全数simulationであり、形式証明ではありません。
 
@@ -188,6 +203,8 @@ reciprocalは次のように分かれます。
 ```
 
 符号を保持し、指数を反転して、`1/m` だけを近似します。
+subnormal入力は仮数を左へshiftして同じ `1 <= m < 2` の形へ正規化し、その分だけ指数を補正します。
+既存の仮数格子へ無誤差で移せるため、subnormal専用の係数表は不要です。
 
 rsqrtは正入力に対し、指数を `E = 2*k + p`、
 `k = floor(E/2)`、`p = 0 または 1` と分けます。
@@ -287,13 +304,28 @@ BF16だけなら近似乗算に必要な幅はsigned 7×7ですが、
   `8191/8192`、BF16が `511/512` と1を少し下回りますが、どちらも最終RNEで1になります。
   この位置でも汎用の値依存正規化と同じ出力になります。
 
-近似結果は14 bitに収まり、underflow境界の補正を含めても丸め位置は−1／0／1の三通りです。
-expの最終RNEによる指数carryは必要なので残します。
-最小normalへの繰上がりを判定してからFTZし、最後に符号と特殊値を選びます。
+近似結果は14 bitに収まります。まず三通りの固定位置から保持部・guard・stickyを選びます。
+subnormal出力では、さらに指数不足分だけ右shiftし、捨てたbitをstickyへ集約します。
+最終RNEを一度だけ行うため、normalへ丸めてからsubnormalへ丸め直す二重丸めは起こしません。
+最小normalへの繰上がりと、expの最終RNEによる指数carryも保持します。
+FTZ設定では追加の右shift回路を定数化で除き、最小normalへ丸め上がらない結果をzeroにします。
+最後に符号と特殊値を選びます。
 
 正規化固定は、現在の係数と丸め位置による値域を前提とする最適化です。
-`test_fixed_normalization_exhaustive` で前提と全入力のpack一致を確認し、
+`test_fixed_normalization_exhaustive` と `test_subnormal_exhaustive` で前提と全入力のpack一致を確認し、
 整数モデルの汎用packは独立した比較対象として維持します。
+
+#### 4. subnormal対応で追加する回路
+
+reciprocal／rsqrtの入力には、仮数の先頭zero検出、左shift、指数補正を追加します。
+BF16の7-bit fractionもFP16と同じ10-bit位置へ上詰めし、同じ回路を使います。
+正規化後のfractionと指数偶奇から、従来と同じ係数表と厳密点を選びます。
+expのsubnormal入力は、両形式とも正しく丸めると1になるため、近似経路へは渡しません。
+
+出力には、保持部・guard・stickyを合わせた13 bitの右shift回路を追加します。
+1／2／4／8 bitの四段でshiftし、各段で捨てるbitの論理和をstickyへ引き継ぎます。
+13 bit以上は必ずzeroへ丸まるため、shift量は4 bitで十分です。
+rsqrtは正の有限入力からsubnormal結果を生じず、この経路を必要とするのはexpとreciprocalです。
 
 #### 主な演算資源
 
@@ -303,6 +335,7 @@ expの最終RNEによる指数carryは必要なので残します。
 
 専用設定では、内部の形式選択を一か所で定数化します。
 不要な表・選択回路・上位bitの除去は合成器へ任せ、専用RTLや別カーネルは追加しません。
+subnormal対応も同じRTL内の合成時設定であり、係数・乗算器は両設定で共通です。
 
 ## 定数とテーブルの照合
 
@@ -328,7 +361,7 @@ SystemVerilogのunpacked定数配列に対応したフローを使用してく�
 clockを持たないため、入力から出力までの組合せパスに遅延制約を与えます。
 
 `FORMAT_MODE=0` では `is_bf16` もデータパスの入力です。
-二形式切替と専用設定の評価では、同じRTLに対するパラメータ値を区別してください。
+二形式切替と専用設定の評価では、`FORMAT_MODE` と `SUPPORT_SUBNORMAL` の両方を記録してください。
 定数乗算の分解や不要bitの削除を含む実際の演算資源は、合成結果で確認します。
 
 ## ライセンス

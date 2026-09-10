@@ -29,8 +29,8 @@ def width(v, signed=False):
     return max(1, hi.bit_length())
 
 
-def pack(y, q, scale, f):
-    """正の整数 y * 2^(scale-q) を対象形式にRNEし、最後にFTZ。"""
+def pack(y, q, scale, f, support_subnormal=False):
+    """正の整数 y * 2^(scale-q) を対象形式にRNEし、設定に従ってFTZ。"""
     y = np.asarray(y, dtype=np.int64)
     bias = (1 << (14 - f)) - 1
     inf = ((1 << (15 - f)) - 1) << f
@@ -43,21 +43,23 @@ def pack(y, q, scale, f):
     m = np.where(carry, m >> 1, m)
     exponent = exponent + carry
     bits = ((exponent + bias) << f) + m - (1 << f)
-    return np.where((m < (1 << f)) | (y == 0), 0,
+    return np.where((m < (1 << f)) | (y == 0), m if support_subnormal else 0,
                     np.where(exponent > bias, inf, bits)).astype(np.int64)
 
 
-def decode(u, f):
+def decode(u, f, support_subnormal=False):
     u = np.asarray(u, dtype=np.int64)
     bias = (1 << (14 - f)) - 1
     e, m = (u & 0x7fff) >> f, (u & ((1 << f) - 1)) + (1 << f)
     x = np.ldexp(m.astype(float), e - bias - f)
-    return np.where(e == 0, 0.0, x) * np.where(u & 0x8000, -1, 1)
+    tiny = np.ldexp((m - (1 << f)).astype(float), 1-bias-f) if support_subnormal else 0.0
+    return np.where(e == 0, tiny, x) * np.where(u & 0x8000, -1, 1)
 
 
 class Domain:
-    def __init__(self, f, op, ref):
+    def __init__(self, f, op, ref, support_subnormal=False):
         self.f, self.op, self.ref = f, op, ref.astype(np.int64)
+        self.support_subnormal = support_subnormal
         self.bias = (1 << (14 - f)) - 1
         self.inf = ((1 << (15 - f)) - 1) << f
         self.nan = self.inf | (1 << (f - 1))
@@ -67,17 +69,25 @@ class Domain:
         exponent = a >> f
         self.frac = u & ((1 << f) - 1)
         self.e = exponent - self.bias
-        self.x = decode(u, f)
+        self.x = decode(u, f, support_subnormal)
         normal = (exponent != 0) & (a < self.inf)
-        self.active = normal & ((sign == 0) if op == "rsqrt" else True)
+        zero = (a == 0) if support_subnormal else (exponent == 0)
+        finite_nonzero = ((a > 0) & (a < self.inf)) if support_subnormal else normal
+        self.active = finite_nonzero & ((sign == 0) if op == "rsqrt" else True)
+        if support_subnormal:
+            # subnormalの仮数を正規化する。整数からfloatへの変換はこの幅では厳密。
+            sub = (exponent == 0) & (self.frac != 0)
+            shift = f + 1 - np.frexp(self.frac[sub].astype(float))[1]
+            self.frac[sub] = (self.frac[sub] << shift) & ((1 << f)-1)
+            self.e[sub] = 1 - self.bias - shift
         if op == "exp":
-            self.active &= (self.x > -128) & (self.x < 128)
+            self.active &= normal & (self.x > -128) & (self.x < 128)
             self.base = np.where(sign != 0, 0, self.inf)
             self.base = np.where(exponent == 0, self.bias << f, self.base)
         elif op == "recip":
-            self.base = np.where(exponent == 0, sign | self.inf, sign)
+            self.base = np.where(zero, sign | self.inf, sign)
         else:
-            self.base = np.where(exponent == 0, sign | self.inf,
+            self.base = np.where(zero, sign | self.inf,
                                  np.where(sign != 0, self.nan, 0))
         self.base = np.where(a > self.inf, self.nan, self.base)
         # 数値順の入力列を準備し、poleをまたがない領域で単調性を確認する。
@@ -92,22 +102,23 @@ class Domain:
         out = self.base.copy()
         if self.op == "exp":
             values, scale = y
-            out[a] = pack(values, q, scale, self.f)
+            out[a] = pack(values, q, scale, self.f, self.support_subnormal)
         else:
             idx = self.frac[a]
             scale = -self.e[a]
             if self.op == "rsqrt":
                 idx = idx + (self.e[a] & 1) * (1 << self.f)
                 scale = -(self.e[a] >> 1)
-            out[a] = pack(y[idx], q, scale, self.f)
+            out[a] = pack(y[idx], q, scale, self.f, self.support_subnormal)
             if self.op == "recip":
                 out[a] |= self.u[a] & 0x8000
         return out
 
     def metrics(self, out):
         a, b = self.ref & 0x7fff, out & 0x7fff
-        rn = (a >= (1 << self.f)) & (a < self.inf)
-        on = (b >= (1 << self.f)) & (b < self.inf)
+        lower = 1 if self.support_subnormal else (1 << self.f)
+        rn = (a >= lower) & (a < self.inf)
+        on = (b >= lower) & (b < self.inf)
         valid = rn & on & ((out & 0x8000) == (self.ref & 0x8000))
         errors = np.abs(out - self.ref)
         bad = np.where(valid, errors > 1, out != self.ref)

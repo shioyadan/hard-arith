@@ -7,6 +7,7 @@
 #include <vector>
 
 static_assert(FORMAT_MODE >= 0 && FORMAT_MODE <= 2, "unsupported FORMAT_MODE");
+static_assert(SUPPORT_SUBNORMAL == 0 || SUPPORT_SUBNORMAL == 1, "unsupported SUPPORT_SUBNORMAL");
 
 static bool read_vectors(const char *path, std::vector<uint16_t> &values) {
     FILE *input = std::fopen(path, "rb");
@@ -50,4 +51,5 @@ int main(int argc, char **argv) {
     }
     std::puts("PASS: legal=393216 invalid=655360 total=1048576 bit-exact vectors; format alternates every evaluation");
     std::printf("FORMAT_MODE=%d: is_bf16 input %s\n", FORMAT_MODE, FORMAT_MODE ? "ignored" : "selected");
+    std::printf("SUPPORT_SUBNORMAL=%d\n", SUPPORT_SUBNORMAL);
 }

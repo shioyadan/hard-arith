@@ -2,11 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // gen_rtl.pyで生成。FP16／BF16の一次方式を実行時に切り替える。
 // is_bf16=0: FP16、1: BF16。op=001: exp、010: recip、100: rsqrt。
-// 入出力FTZ、normal結果は最大1 RNE step。特殊値の仕様はREADME.mdを参照。
+// 入出力subnormal対応を合成時に選択。有限非zero結果は最大1 RNE step。
 // 流れ: 入力分解 → 範囲縮小 → 係数選択 → 共有一次近似 → 正規化・丸め → 特殊値選択。
 // Qqは整数値を2^qで割って解釈する固定小数点表記。signedの有無は各wireに明示する。
 module FP16BF16ExpRecipRsqrtStudy #(
-    parameter integer FORMAT_MODE = 0 // 0: 実行時切替、1: FP16専用、2: BF16専用
+    parameter integer FORMAT_MODE = 0, // 0: 実行時切替、1: FP16専用、2: BF16専用
+    parameter bit SUPPORT_SUBNORMAL = 1'b1
 ) (
     input wire [15:0] x,
     input wire [2:0] op,
@@ -28,7 +29,21 @@ module FP16BF16ExpRecipRsqrtStudy #(
     wire fraction_zero = use_bf16 ? (~|x[6:0]) : (~|x[9:0]);
     wire signed [8:0] input_e =
         $signed({1'b0, exponent}) - (use_bf16 ? 9'sd127 : 9'sd15);
-    wire parity = input_e[0];
+    // 根系だけ入力subnormalを正規化する。BF16の7 bitも上詰めで10 bitへそろえる。
+    wire [9:0] input_fraction = use_bf16 ? {x[6:0], 3'd0} : x[9:0];
+    wire input_subnormal = SUPPORT_SUBNORMAL & exponent_zero & !fraction_zero;
+    wire input_zero = exponent_zero & (!SUPPORT_SUBNORMAL | fraction_zero);
+    wire [3:0] leading_shift =
+        input_fraction[9] ? 4'd1 : input_fraction[8] ? 4'd2 :
+        input_fraction[7] ? 4'd3 : input_fraction[6] ? 4'd4 :
+        input_fraction[5] ? 4'd5 : input_fraction[4] ? 4'd6 :
+        input_fraction[3] ? 4'd7 : input_fraction[2] ? 4'd8 :
+        input_fraction[1] ? 4'd9 : 4'd10;
+    // 左shiftで暗黙の1を落とし、小数部だけを既存の近似格子へ渡す。
+    wire [9:0] root_fraction = input_subnormal ? (input_fraction << leading_shift) : input_fraction;
+    wire signed [8:0] root_e = input_subnormal ?
+        (use_bf16 ? -9'sd126 : -9'sd14) - $signed({5'd0, leading_shift}) : input_e;
+    wire parity = root_e[0];
 
     // 2. expの範囲縮小: z=x*log2(e)、exp(x)=2^floor(z)*2^frac(z)
     // 仮数をQ10へ揃え、Q14のlog2(e)を掛ける。exp_productはQ24。
@@ -94,7 +109,7 @@ module FP16BF16ExpRecipRsqrtStudy #(
     // 近似に使うtの下位bitは、根系ではm-1、expではfrac(z)を表す。
     // 有効な小数部はFP16: t[12:0] (Q13)、BF16: t[8:0] (Q9)。
     // 負のexp_zも下位bitがfrac(z)、上位bitがfloor(z)を表す。
-    wire [12:0] root_t = use_bf16 ? {4'd0, x[6:0], 2'd0} : {x[9:0], 3'd0};
+    wire [12:0] root_t = use_bf16 ? {4'd0, root_fraction[9:3], 2'd0} : {root_fraction, 3'd0};
     wire [12:0] t = select_exp ? exp_z[12:0] : root_t;
 
     // 3. 区間中心からの残差dと係数c0・c1を選ぶ
@@ -248,7 +263,7 @@ module FP16BF16ExpRecipRsqrtStudy #(
     wire signed [15:0] correction = product_high + $signed({15'd0, product_round});
     wire signed [15:0] polynomial = $signed({2'd0, c0}) + correction;
     // recip(m=1)、rsqrt(m=1かつ偶数指数)は近似せず、厳密な1を選択する。
-    wire exact_root = !select_exp & fraction_zero & (select_recip | !parity);
+    wire exact_root = !select_exp & (~|root_fraction) & (select_recip | !parity);
     wire [13:0] y = exact_root ? (use_bf16 ? 14'd512 : 14'd8192) : polynomial[13:0];
 
     // 5. 正規化、指数復元、出力形式へのRNE
@@ -257,11 +272,11 @@ module FP16BF16ExpRecipRsqrtStudy #(
     wire signed [2:0] normalization = (select_exp | exact_root) ? 3'sd0 : -3'sd1;
     wire signed [8:0] exp_scale = use_bf16 ? $signed(exp_z[17:9]) : $signed(exp_z[21:13]);
     // exp: floor(z)、recip: -e、rsqrt: -floor(e/2)を復元する。
-    wire signed [8:0] scale = select_exp ? exp_scale : select_recip ? -input_e : -(input_e >>> 1);
+    wire signed [8:0] scale = select_exp ? exp_scale : select_recip ? -root_e : -(root_e >>> 1);
     wire signed [9:0] biased_before = $signed({scale[8], scale}) + (use_bf16 ? 10'sd127 : 10'sd15)
                                    + $signed({{7{normalization[2]}}, normalization});
-    // min normal直下も一度丸め、min normalへ繰り上がらなかった出力だけFTZにする。
-    wire near_underflow = biased_before == 10'sd0;
+    // underflow時は最小normalの仮数位置へそろえる。FTZでも境界のRNEは保持する。
+    wire near_underflow = SUPPORT_SUBNORMAL ? (biased_before <= 10'sd0) : (biased_before == 10'sd0);
     wire signed [2:0] pack_adjust = normalization + $signed({2'd0, near_underflow});
     wire [12:0] fp16_pack_grs = (pack_adjust == -3'sd1) ? {y[12:2], y[1], (|y[0:0])} :
         (pack_adjust == 3'sd0) ? {y[13:3], y[2], (|y[1:0])} :
@@ -269,8 +284,20 @@ module FP16BF16ExpRecipRsqrtStudy #(
     wire [9:0] bf16_pack_grs = (pack_adjust == -3'sd1) ? {y[8:1], y[0], 1'b0} :
         (pack_adjust == 3'sd0) ? {y[9:2], y[1], (|y[0:0])} :
         {{1'd0, y[9:3]}, y[2], (|y[1:0])};
-    // pack_grs[12:2]が保持部、[1]がguard、[0]がsticky。
-    wire [12:0] pack_grs = use_bf16 ? {3'd0, bf16_pack_grs} : fp16_pack_grs;
+    // 追加の右shiftは丸め前に行い、捨てるbitをstickyへ集約する。
+    // 13 bit以上のshiftは同じzeroへ丸まるため、制御幅を4 bitへ制限する。
+    wire [3:0] denormal_shift = (SUPPORT_SUBNORMAL && biased_before < 10'sd0) ?
+        ((biased_before < -10'sd12) ? 4'd13 : (4'd0 - biased_before[3:0])) : 4'd0;
+    wire [12:0] unshifted_grs = use_bf16 ? {3'd0, bf16_pack_grs} : fp16_pack_grs;
+    wire [12:0] denormal_grs_1 = denormal_shift[0] ?
+        {1'd0, unshifted_grs[12:2], (|unshifted_grs[1:0])} : unshifted_grs;
+    wire [12:0] denormal_grs_2 = denormal_shift[1] ?
+        {2'd0, denormal_grs_1[12:3], (|denormal_grs_1[2:0])} : denormal_grs_1;
+    wire [12:0] denormal_grs_4 = denormal_shift[2] ?
+        {4'd0, denormal_grs_2[12:5], (|denormal_grs_2[4:0])} : denormal_grs_2;
+    wire [12:0] pack_grs = denormal_shift[3] ?
+        {8'd0, denormal_grs_4[12:9], (|denormal_grs_4[8:0])} : denormal_grs_4;
+    // pack_grs[12:2]が保持部、[1]がguard、[0]がsticky。最終RNEは一度だけ。
     wire [11:0] packed_m = {1'b0, pack_grs[12:2]} + {11'd0, (pack_grs[1] & (pack_grs[0] | pack_grs[2]))};
     wire pack_carry = use_bf16 ? packed_m[8] : packed_m[11];
     wire signed [9:0] packed_e = (near_underflow ? 10'sd1 : biased_before) + $signed({9'd0, pack_carry});
@@ -280,18 +307,21 @@ module FP16BF16ExpRecipRsqrtStudy #(
     wire [14:0] inf = use_bf16 ? 15'd32640 : 15'd31744;
     wire [15:0] nan = use_bf16 ? 16'd32704 : 16'd32256;
     wire [14:0] normal_payload = use_bf16 ? {packed_e[7:0], packed_fraction[6:0]} : {packed_e[4:0], packed_fraction};
-    wire [14:0] finite_payload = (biased_before < 10'sd0 || packed_m < (use_bf16 ? 12'd128 : 12'd1024)) ? 15'd0
+    wire tiny_result = packed_m < (use_bf16 ? 12'd128 : 12'd1024);
+    wire [14:0] finite_payload = SUPPORT_SUBNORMAL && near_underflow && tiny_result ?
+                                {5'd0, packed_fraction} :
+                                (biased_before < 10'sd0 || tiny_result) ? 15'd0
                               : (packed_e >= (use_bf16 ? 10'sd255 : 10'sd31)) ? inf : normal_payload;
 
     // 6. 特殊値と無効opの選択（近似結果より優先する）
     // expの|x|>=128は両形式ともoverflow／FTZとなり、近似経路を使わない。
     wire is_nan = exponent_all_ones & !fraction_zero;
-    wire negative_rsqrt = select_rsqrt & x[15] & !exponent_zero;
+    wire negative_rsqrt = select_rsqrt & x[15] & !input_zero;
     wire exp_large = input_e >= 9'sd7;
     // exp(±0)=1: BF16=0x3f80、FP16=0x3c00。
     wire [15:0] exp_result = exponent_zero ? (use_bf16 ? 16'd16256 : 16'd15360)
                            : exp_large ? (x[15] ? 16'd0 : {1'b0, inf}) : {1'b0, finite_payload};
-    wire [15:0] root_result = exponent_zero ? {x[15], inf}
+    wire [15:0] root_result = input_zero ? {x[15], inf}
                             : exponent_all_ones ? {(select_recip & x[15]), 15'd0}
                             : {(select_recip & x[15]), finite_payload};
     assign result = (!valid_op | is_nan | negative_rsqrt) ? nan : select_exp ? exp_result : root_result;

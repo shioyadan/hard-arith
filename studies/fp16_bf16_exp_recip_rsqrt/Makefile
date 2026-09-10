@@ -8,17 +8,24 @@ $(error 未知のVARIANTです: $(VARIANT))
 endif
 RTL_TOP := FP16BF16ExpRecipRsqrtStudy
 FORMAT_MODE ?= 0
+SUPPORT_SUBNORMAL ?= 1
+ifeq ($(filter $(SUPPORT_SUBNORMAL),0 1),)
+$(error 未対応のSUPPORT_SUBNORMALです: $(SUPPORT_SUBNORMAL))
+endif
 ifeq ($(filter $(FORMAT_MODE),0 1 2),)
 $(error 未対応のFORMAT_MODEです: $(FORMAT_MODE))
 endif
-RTL_BUILD := build/$(VARIANT)/format-$(FORMAT_MODE)
+VECTOR_BUILD := build/subnormal-$(SUPPORT_SUBNORMAL)
+RTL_BUILD := $(VECTOR_BUILD)/format-$(FORMAT_MODE)
 .PHONY: test check
 build/reference: reference.cpp
 	mkdir -p build
 	$(CXX) -std=c++17 -O2 $< -lm -o $@
 build/reference.bin: build/reference
 	$< $@
-test: build/reference.bin
+build/reference-subnormal.bin: build/reference
+	$< $@ 1
+test: build/reference.bin build/reference-subnormal.bin
 	$(PYTHON) -m unittest -v test_study.py
 check: test rtl-check
 
@@ -29,14 +36,16 @@ rtl-check:
 	$(PYTHON) gen_rtl.py --check
 rtl-lint: rtl-check
 	verilator --lint-only -Wall -Wno-UNUSEDSIGNAL -Wno-DECLFILENAME \
-		--top-module $(RTL_TOP) -GFORMAT_MODE=$(FORMAT_MODE) rtl/$(VARIANT).sv
-rtl-vectors: build/reference.bin
-	$(PYTHON) gen_rtl.py --check --vectors
+		--top-module $(RTL_TOP) -GFORMAT_MODE=$(FORMAT_MODE) "-GSUPPORT_SUBNORMAL=1'b$(SUPPORT_SUBNORMAL)" rtl/$(VARIANT).sv
+rtl-vectors: build/reference.bin build/reference-subnormal.bin
+	$(PYTHON) gen_rtl.py --check --vectors --support-subnormal $(SUPPORT_SUBNORMAL)
 $(RTL_BUILD)/V$(RTL_TOP): rtl/$(VARIANT).sv rtl_test.cpp Makefile
 	verilator --cc --exe --build -j 4 -Wall -Wno-UNUSEDSIGNAL -Wno-DECLFILENAME \
-		--top-module $(RTL_TOP) -GFORMAT_MODE=$(FORMAT_MODE) -CFLAGS -DFORMAT_MODE=$(FORMAT_MODE) \
+		--top-module $(RTL_TOP) -GFORMAT_MODE=$(FORMAT_MODE) "-GSUPPORT_SUBNORMAL=1'b$(SUPPORT_SUBNORMAL)" \
+		-CFLAGS '-DFORMAT_MODE=$(FORMAT_MODE) -DSUPPORT_SUBNORMAL=$(SUPPORT_SUBNORMAL)' \
 		--Mdir $(RTL_BUILD) $< $(CURDIR)/rtl_test.cpp
 rtl-test: rtl-lint rtl-vectors $(RTL_BUILD)/V$(RTL_TOP)
-	$(RTL_BUILD)/V$(RTL_TOP) build/fp16.bin build/bf16.bin
+	$(RTL_BUILD)/V$(RTL_TOP) $(VECTOR_BUILD)/fp16.bin $(VECTOR_BUILD)/bf16.bin
 rtl-test-all: test
-	@for mode in 0 1 2; do $(MAKE) rtl-test FORMAT_MODE=$$mode || exit $$?; done
+	@for subnormal in 0 1; do for mode in 0 1 2; do \
+		$(MAKE) rtl-test FORMAT_MODE=$$mode SUPPORT_SUBNORMAL=$$subnormal || exit $$?; done; done

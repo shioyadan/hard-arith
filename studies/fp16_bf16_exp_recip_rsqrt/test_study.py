@@ -12,6 +12,7 @@ class IntegerModelTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.refs = np.fromfile("build/reference.bin", dtype="<u2").reshape(2, 3, 65536)
+        cls.subnormal_refs = np.fromfile("build/reference-subnormal.bin", dtype="<u2").reshape(2, 3, 65536)
 
     def test_signed_ties(self):
         v = np.arange(-20, 21, dtype=np.int64)
@@ -115,6 +116,7 @@ class IntegerModelTests(unittest.TestCase):
         rtl = generate()
         self.assertIn("input wire is_bf16", rtl)
         self.assertIn("parameter integer FORMAT_MODE = 0", rtl)
+        self.assertIn("parameter bit SUPPORT_SUBNORMAL = 1'b1", rtl)
         self.assertIn("wire use_bf16 = (FORMAT_MODE == 2) || ((FORMAT_MODE == 0) && is_bf16);", rtl)
         self.assertNotIn("is_bf16", rtl.split("wire use_bf16 =", 1)[1].split(";", 1)[1])
         self.assertEqual(rtl.count("module FP16BF16ExpRecipRsqrtStudy"), 1)
@@ -150,6 +152,10 @@ class IntegerModelTests(unittest.TestCase):
         self.assertGreater(metrics["monotonic"], 0)
 
     def test_oracle_high_precision_spots(self):
+        self.check_oracle_high_precision_spots(False)
+        self.check_oracle_high_precision_spots(True)
+
+    def check_oracle_high_precision_spots(self, support_subnormal):
         # binary128と独立な100桁演算で、固定seed抽出と結果分類境界を照合する。
         mp.mp.dps = 100
         rng = np.random.default_rng(20260910)
@@ -157,16 +163,18 @@ class IntegerModelTests(unittest.TestCase):
             bias = (1 << (14-f))-1
             inf = ((1 << (15-f))-1) << f
             for oi in range(3):
-                ref = self.refs[fi, oi]
+                ref = (self.subnormal_refs if support_subnormal else self.refs)[fi, oi]
                 category = np.where((ref & 0x7fff) == 0, 0,
-                                    np.where((ref & 0x7fff) >= inf, 2, 1))
+                                    np.where((ref & 0x7fff) >= inf, 3,
+                                             np.where((ref & 0x7fff) < (1 << f), 1, 2)))
                 borders = np.flatnonzero(np.diff(category))
-                cases = np.unique(np.r_[rng.integers(0, 65536, 256), borders, borders+1])
+                cases = np.unique(np.r_[rng.integers(0, 65536, 256), borders, borders+1,
+                                        np.arange(1, 1 << f), np.arange(1, 1 << f) | 0x8000])
                 for u in cases:
                     a = int(u) & 0x7fff
-                    if a < (1 << f) or a >= inf or (oi == 2 and u & 0x8000):
+                    if a < (1 if support_subnormal else (1 << f)) or a >= inf or (oi == 2 and u & 0x8000):
                         continue
-                    x = mp.mpf(float(decode(u, f)))
+                    x = mp.mpf(float(decode(u, f, support_subnormal)))
                     if oi == 0 and abs(x) >= 1024:
                         continue
                     y = mp.exp(x) if oi == 0 else 1/x if oi == 1 else 1/mp.sqrt(x)
@@ -182,13 +190,76 @@ class IntegerModelTests(unittest.TestCase):
                         tail = scaled-lo
                         m = lo + int(tail > mp.mpf('.5') or (tail == mp.mpf('.5') and lo & 1))
                         if m < (1 << f):
-                            expected = 0
+                            expected = m if support_subnormal else 0
                         else:
                             if m >= (2 << f):
                                 m >>= 1
                                 e += 1
                             expected = inf if e > bias else ((e+bias) << f) + m - (1 << f)
                     self.assertEqual(int(ref[u]), expected | sign, (f, oi, hex(int(u))))
+
+    def test_subnormal_pack_and_normalization(self):
+        for fi, f in enumerate((10, 7)):
+            domain = Domain(f, "recip", self.subnormal_refs[fi, 1], True)
+            bits = np.arange(1, domain.inf, dtype=np.int64)
+            exponent = bits >> f
+            mantissa = (bits & ((1 << f)-1)) + np.where(exponent == 0, 0, 1 << f)
+            scale = np.maximum(exponent, 1) - domain.bias
+            np.testing.assert_array_equal(pack(mantissa, f, scale, f, True), bits)
+            # 正規化した仮数と指数から、元の全有限非zero入力を無誤差で再構成できる。
+            active = domain.active
+            reconstructed = np.ldexp((1 + domain.frac[active] / (1 << f)), domain.e[active])
+            np.testing.assert_array_equal(reconstructed, np.abs(domain.x[active]))
+            # zero/subnormalおよびsubnormal/normal境界のtie、隣接格子。
+            self.assertEqual(int(pack(1, 1, 1-domain.bias-f, f, True)), 0)
+            self.assertEqual(int(pack(3, 2, 1-domain.bias-f, f, True)), 1)
+            self.assertEqual(int(pack(3, 1, 1-domain.bias-f, f, True)), 2)
+            self.assertEqual(int(pack((1 << (f+1))-1, f+1, 1-domain.bias, f, True)), 1 << f)
+            self.assertEqual(int(pack((1 << (f+2))-3, f+2, 1-domain.bias, f, True)), (1 << f)-1)
+
+    def test_subnormal_exhaustive(self):
+        from gen_rtl import PROFILES
+
+        for fi, (f, (q, q1), bs) in enumerate(PROFILES.values()):
+            for oi, (op, b) in enumerate(zip(("exp", "recip", "rsqrt"), bs)):
+                domain = Domain(f, op, self.subnormal_refs[fi, oi], True)
+                out = linear(domain, b, q, q1)
+                metrics = domain.metrics(out)
+                self.assertEqual(metrics["violations"], 0, (f, op, metrics))
+                self.assertEqual(metrics["monotonic"], 0, (f, op, metrics))
+                np.testing.assert_array_equal(domain.base[~domain.active], domain.ref[~domain.active])
+                # normal入力で出力もnormalなら、既存FTZ版からbit単位で変えない。
+                old = linear(Domain(f, op, self.refs[fi, oi]), b, q, q1)
+                unchanged = ((domain.u & 0x7fff) >= (1 << f)) & ((old & 0x7fff) >= (1 << f))
+                np.testing.assert_array_equal(out[unchanged], old[unchanged])
+                # zeroは従来通り。負のsubnormalはrsqrtではzeroでなくNaN。
+                self.assertEqual(int(out[0x8000]), domain.bias << f if op == "exp" else 0x8000 | domain.inf)
+                if op == "rsqrt":
+                    np.testing.assert_array_equal(out[0x8001:0x8000+(1 << f)], domain.nan)
+                # 固定正規化＋subnormal丸めを、汎用packと全入力で照合する。
+                d, index, scale = residual(domain, b, q)
+                table = coefficients(op, b)
+                y = np.rint(table[:, 0] * (1 << q)).astype(np.int64)[index]
+                y += rne(d * np.rint(table[:, 1] * (1 << q1)).astype(np.int64)[index], q1)
+                if op == "exp":
+                    normalization = np.zeros_like(y)
+                else:
+                    y[0] = 1 << q
+                    idx = domain.frac[domain.active]
+                    if op == "rsqrt":
+                        idx = idx + (domain.e[domain.active] & 1) * (1 << f)
+                    y = y[idx]
+                    normalization = np.where(idx == 0, 0, -1)
+                    scale = -(domain.e[domain.active] >> 1) if op == "rsqrt" else -domain.e[domain.active]
+                biased = scale + domain.bias + normalization
+                shift = q-f+normalization+np.maximum(1-biased, 0)
+                m = rne(y, shift)
+                carry = m >= (2 << f)
+                e = np.maximum(biased, 1) + carry
+                m = np.where(carry, m >> 1, m)
+                fixed = np.where(m < (1 << f), m,
+                                 np.where(e >= 2*domain.bias+1, domain.inf, (e << f) + m - (1 << f)))
+                np.testing.assert_array_equal(fixed, pack(y, q, scale, f, True))
 
 
 if __name__ == "__main__":
