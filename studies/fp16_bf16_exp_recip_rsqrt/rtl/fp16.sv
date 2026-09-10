@@ -249,13 +249,12 @@ module FP16BF16ExpRecipRsqrtStudy #(
     wire signed [15:0] polynomial = $signed({2'd0, c0}) + correction;
     // recip(m=1)、rsqrt(m=1かつ偶数指数)は近似せず、厳密な1を選択する。
     wire exact_root = !select_exp & fraction_zero & (select_recip | !parity);
-    wire [14:0] y = exact_root ? (use_bf16 ? 15'd512 : 15'd8192) : polynomial[14:0];
+    wire [13:0] y = exact_root ? (use_bf16 ? 14'd512 : 14'd8192) : polynomial[13:0];
 
     // 5. 正規化、指数復元、出力形式へのRNE
-    // yはQ13／Q9。到達するbinadeは[0.5,1)、[1,2)、[2,4)の三つだけ。
-    wire y_ge_two = use_bf16 ? y[10] : y[14];
-    wire y_ge_one = use_bf16 ? y[9] : y[13];
-    wire signed [2:0] normalization = y_ge_two ? 3'sd1 : y_ge_one ? 3'sd0 : -3'sd1;
+    // 根系の非厳密点は[0.5,1)。expの1未満の値も、出力RNEでは必ず1へ丸まる。
+    // 全入力の丸め・FTZ照合により、近似結果を待たずに正規化位置を決められる。
+    wire signed [2:0] normalization = (select_exp | exact_root) ? 3'sd0 : -3'sd1;
     wire signed [8:0] exp_scale = use_bf16 ? $signed(exp_z[17:9]) : $signed(exp_z[21:13]);
     // exp: floor(z)、recip: -e、rsqrt: -floor(e/2)を復元する。
     wire signed [8:0] scale = select_exp ? exp_scale : select_recip ? -input_e : -(input_e >>> 1);
@@ -266,12 +265,10 @@ module FP16BF16ExpRecipRsqrtStudy #(
     wire signed [2:0] pack_adjust = normalization + $signed({2'd0, near_underflow});
     wire [12:0] fp16_pack_grs = (pack_adjust == -3'sd1) ? {y[12:2], y[1], (|y[0:0])} :
         (pack_adjust == 3'sd0) ? {y[13:3], y[2], (|y[1:0])} :
-        (pack_adjust == 3'sd1) ? {y[14:4], y[3], (|y[2:0])} :
-        {{1'd0, y[14:5]}, y[4], (|y[3:0])};
+        {{1'd0, y[13:4]}, y[3], (|y[2:0])};
     wire [9:0] bf16_pack_grs = (pack_adjust == -3'sd1) ? {y[8:1], y[0], 1'b0} :
         (pack_adjust == 3'sd0) ? {y[9:2], y[1], (|y[0:0])} :
-        (pack_adjust == 3'sd1) ? {y[10:3], y[2], (|y[1:0])} :
-        {{1'd0, y[10:4]}, y[3], (|y[2:0])};
+        {{1'd0, y[9:3]}, y[2], (|y[1:0])};
     // pack_grs[12:2]が保持部、[1]がguard、[0]がsticky。
     wire [12:0] pack_grs = use_bf16 ? {3'd0, bf16_pack_grs} : fp16_pack_grs;
     wire [11:0] packed_m = {1'b0, pack_grs[12:2]} + {11'd0, (pack_grs[1] & (pack_grs[0] | pack_grs[2]))};

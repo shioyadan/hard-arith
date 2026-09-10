@@ -5,7 +5,7 @@ import unittest
 import mpmath as mp
 import numpy as np
 
-from study import Domain, decode, linear, pack, rne
+from study import Domain, coefficients, decode, linear, pack, residual, rne
 
 
 class IntegerModelTests(unittest.TestCase):
@@ -64,6 +64,51 @@ class IntegerModelTests(unittest.TestCase):
                 self.assertEqual(row["violations"], 0, (f, op, row))
                 self.assertEqual(row["monotonic"], 0, (f, op, row))
 
+    def test_fixed_normalization_exhaustive(self):
+        from gen_rtl import PROFILES
+
+        for f, (q, q1), bs in PROFILES.values():
+            for oi, (op, b) in enumerate(zip(("exp", "recip", "rsqrt"), bs)):
+                domain = Domain(f, op, self.refs[0 if f == 10 else 1, oi])
+                d, index, scale = residual(domain, b, q)
+                c = coefficients(op, b)
+                c0 = np.rint(c[:, 0] * (1 << q)).astype(np.int64)
+                c1 = np.rint(c[:, 1] * (1 << q1)).astype(np.int64)
+                value = c0[index] + rne(d * c1[index], q1)
+                # 量子化・中間RNEを含めた値域。yの上位bitを捨てても値は変わらない。
+                self.assertTrue(np.all((value >= 0) & (value < (1 << (q+1)))), (f, op))
+                self.assertLessEqual(q+1, 14)
+                if op == "exp":
+                    # 1未満の近似値も、元の正規化位置と固定位置の両方で1へ丸まる。
+                    below_one = value[value < (1 << q)]
+                    np.testing.assert_array_equal(rne(below_one, q-f-1), np.full_like(below_one, 2 << f))
+                    np.testing.assert_array_equal(rne(below_one, q-f), np.full_like(below_one, 1 << f))
+                    y = value
+                    normalization = np.zeros_like(y)
+                else:
+                    # 添字0だけが厳密1の点。rsqrtの奇数指数側m=1は通常の近似点。
+                    self.assertTrue(np.all((value[1:] >= (1 << (q-1))) & (value[1:] < (1 << q))), (f, op))
+                    self.assertTrue(np.all(rne(value[1:], q-f-1) < (2 << f)), (f, op))
+                    value[0] = 1 << q
+                    root_index = domain.frac[domain.active]
+                    if op == "rsqrt":
+                        root_index = root_index + (domain.e[domain.active] & 1) * (1 << f)
+                    y = value[root_index]
+                    normalization = np.where(root_index == 0, 0, -1)
+                    scale = -(domain.e[domain.active] >> 1) if op == "rsqrt" else -domain.e[domain.active]
+                # 正規化を先決めしたRTLのpackを、値依存の汎用packと全指数で照合する。
+                biased = scale + domain.bias + normalization
+                near_underflow = biased == 0
+                adjustment = normalization + near_underflow
+                self.assertTrue(np.all(np.isin(adjustment, (-1, 0, 1))), (f, op))
+                m = rne(y, q-f+adjustment)
+                carry = m >= (2 << f)
+                exponent = np.where(near_underflow, 1, biased) + carry
+                fraction = np.where(carry, m >> 1, m) & ((1 << f)-1)
+                fixed = np.where((biased < 0) | (m < (1 << f)), 0,
+                                 np.where(exponent >= 2*domain.bias+1, domain.inf, (exponent << f) | fraction))
+                np.testing.assert_array_equal(fixed, pack(y, q, scale, f), err_msg=f"{f}: {op}")
+
     def test_shared_runtime_datapath(self):
         from gen_rtl import generate
 
@@ -76,6 +121,10 @@ class IntegerModelTests(unittest.TestCase):
         self.assertEqual(rtl.count(" * "), 2)
         self.assertIn("wire signed [19:0] product = d * c1;", rtl)
         self.assertIn("wire [25:0] exp_product = mantissa * 15'd23637;", rtl)
+        self.assertIn("wire [13:0] y = exact_root ?", rtl)
+        self.assertIn("normalization = (select_exp | exact_root) ? 3'sd0 : -3'sd1;", rtl)
+        self.assertNotIn("y_ge_one", rtl)
+        self.assertNotIn("y_ge_two", rtl)
 
     def test_readable_rtl_layout(self):
         from gen_rtl import generate
