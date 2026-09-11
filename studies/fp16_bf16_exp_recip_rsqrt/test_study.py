@@ -75,8 +75,9 @@ class IntegerModelTests(unittest.TestCase):
                 c = coefficients(op, b)
                 c0 = np.rint(c[:, 0] * (1 << q)).astype(np.int64)
                 c1 = np.rint(c[:, 1] * (1 << q1)).astype(np.int64)
-                value = c0[index] + rne(d * c1[index], q1)
-                # 量子化・中間RNEを含めた値域。yの上位bitを捨てても値は変わらない。
+                dropped = 2 if f == 10 else 1
+                value = c0[index] + (((d >> dropped) * c1[index]) >> (q1-dropped))
+                # 量子化・中間floorを含めた値域。yの上位bitを捨てても値は変わらない。
                 self.assertTrue(np.all((value >= 0) & (value < (1 << (q+1)))), (f, op))
                 self.assertLessEqual(q+1, 14)
                 if op == "exp":
@@ -103,6 +104,8 @@ class IntegerModelTests(unittest.TestCase):
                 adjustment = normalization + near_underflow
                 self.assertTrue(np.all(np.isin(adjustment, (-1, 0, 1))), (f, op))
                 m = rne(y, q-f+adjustment)
+                # 現行の係数・残差幅・floorではexpも含めて指数carryを生じない。
+                self.assertTrue(np.all(m < (2 << f)), (f, op))
                 carry = m >= (2 << f)
                 exponent = np.where(near_underflow, 1, biased) + carry
                 fraction = np.where(carry, m >> 1, m) & ((1 << f)-1)
@@ -121,12 +124,14 @@ class IntegerModelTests(unittest.TestCase):
         self.assertNotIn("is_bf16", rtl.split("wire use_bf16 =", 1)[1].split(";", 1)[1])
         self.assertEqual(rtl.count("module FP16BF16ExpRecipRsqrtStudy"), 1)
         self.assertEqual(rtl.count(" * "), 2)
-        self.assertIn("wire signed [19:0] product = d * c1;", rtl)
+        self.assertIn("wire signed [15:0] product = d * c1;", rtl)
         self.assertIn("wire [25:0] exp_product = mantissa * 15'd23637;", rtl)
         self.assertIn("wire [13:0] y = exact_root ?", rtl)
         self.assertIn("normalization = (select_exp | exact_root) ? 3'sd0 : -3'sd1;", rtl)
         self.assertNotIn("y_ge_one", rtl)
         self.assertNotIn("y_ge_two", rtl)
+        self.assertNotIn("pack_carry", rtl)
+        self.assertIn("wire [10:0] packed_m =", rtl)
 
     def test_readable_rtl_layout(self):
         from gen_rtl import generate
@@ -240,7 +245,9 @@ class IntegerModelTests(unittest.TestCase):
                 d, index, scale = residual(domain, b, q)
                 table = coefficients(op, b)
                 y = np.rint(table[:, 0] * (1 << q)).astype(np.int64)[index]
-                y += rne(d * np.rint(table[:, 1] * (1 << q1)).astype(np.int64)[index], q1)
+                dropped = 2 if f == 10 else 1
+                product = (d >> dropped) * np.rint(table[:, 1] * (1 << q1)).astype(np.int64)[index]
+                y += product >> (q1-dropped)
                 if op == "exp":
                     normalization = np.zeros_like(y)
                 else:
@@ -254,6 +261,7 @@ class IntegerModelTests(unittest.TestCase):
                 biased = scale + domain.bias + normalization
                 shift = q-f+normalization+np.maximum(1-biased, 0)
                 m = rne(y, shift)
+                self.assertTrue(np.all(m < (2 << f)), (f, op))
                 carry = m >= (2 << f)
                 e = np.maximum(biased, 1) + carry
                 m = np.where(carry, m >> 1, m)

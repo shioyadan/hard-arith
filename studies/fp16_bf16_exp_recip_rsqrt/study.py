@@ -171,7 +171,9 @@ def linear(domain, b, q, q1):
     c0 = np.rint(c[:, 0] * (1 << q)).astype(np.int64)
     c1 = np.rint(c[:, 1] * (1 << q1)).astype(np.int64)
     d, idx, scale = residual(domain, b, q)
-    value = c0[idx] + rne(d * c1[idx], q1)
+    # 根系の削除bitは元からzero。expだけ残差を負方向へ切り下げる。
+    dropped = 2 if domain.f == 10 else 1
+    value = c0[idx] + (((d >> dropped) * c1[idx]) >> (q1-dropped))
     if domain.op != "exp":
         value[0] = 1 << q  # recip(1)／rsqrt(1)を正確にする。
     return domain.finish((value, scale) if domain.op == "exp" else value, q)

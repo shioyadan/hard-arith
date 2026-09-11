@@ -13,10 +13,10 @@ from pathlib import Path
 import numpy as np
 from study import OPS, Domain, coefficients, linear, residual, width
 
-# (fraction幅, (残差・c0の小数bit数, c1の小数bit数), (exp, recip, rsqrtの区間index幅))
+# (fraction幅, (範囲縮小値・c0の小数bit数, c1の小数bit数), (exp, recip, rsqrtの区間index幅))
 # rsqrtの表だけは、区間indexに指数偶奇の1 bitを加える。
 PROFILES = {
-    "fp16": (10, (13, 9), (4, 4, 4)),
+    "fp16": (10, (13, 7), (4, 4, 4)),
     "bf16": (7, (9, 5), (2, 3, 2)),
 }
 TOP = "FP16BF16ExpRecipRsqrtStudy"
@@ -128,8 +128,9 @@ module FP16BF16ExpRecipRsqrtStudy #(
     // rsqrtの表はparity=0が前半、parity=1が後半。""".splitlines()
     for name, (fraction_bits, coefficient_q, index_widths) in PROFILES.items():
         value_q, slope_q = coefficient_q
+        dropped = 2 if fraction_bits == 10 else 1
         quantized = {}
-        lines += ["", f"    // {name.upper()}: d・c0はQ{value_q}、c1はQ{slope_q}。"]
+        lines += ["", f"    // {name.upper()}: dはQ{value_q-dropped}、c0はQ{value_q}、c1はQ{slope_q}。"]
         for op, index_bits in zip(OPS, index_widths):
             prefix = f"{name}_{op}"
             ideal = coefficients(op, index_bits)
@@ -137,8 +138,8 @@ module FP16BF16ExpRecipRsqrtStudy #(
                              for i, q in enumerate(coefficient_q)]
             domain = Domain(fraction_bits, op, np.zeros(65536, dtype=np.int64))
             residual_values, _, _ = residual(domain, index_bits, value_q)
-            assert width(residual_values, True) <= 9
-            residual_bits = value_q - index_bits
+            assert width(residual_values >> dropped, True) <= 7
+            residual_bits = value_q - index_bits - dropped
             index = f"t[{value_q-1}:{value_q-index_bits}]"
             if op == "rsqrt":
                 index = "{parity, " + index + "}"
@@ -146,10 +147,10 @@ module FP16BF16ExpRecipRsqrtStudy #(
                       ("×指数偶奇2通り。" if op == "rsqrt" else "。"),
                       f"    wire [{index_bits+(op == 'rsqrt')-1}:0] {prefix}_index = {index};",
                       f"    wire signed [{residual_bits-1}:0] {prefix}_d = "
-                      f"{{~t[{residual_bits-1}], t[{residual_bits-2}:0]}};"]
+                      f"{{~t[{value_q-index_bits-1}], t[{value_q-index_bits-2}:{dropped}]}};"]
             for i, values in enumerate(quantized[op]):
                 bits = width(values, i == 1)
-                assert bits <= (14 if i == 0 else 11)
+                assert bits <= (14 if i == 0 else 9)
                 sign = "signed " if i == 1 else ""
                 lines += [f"    localparam logic {sign}[{bits-1}:0] "
                           f"{prefix.upper()}_C{i} [0:{len(values)-1}] = '{{"]
@@ -163,14 +164,14 @@ module FP16BF16ExpRecipRsqrtStudy #(
                           f"    wire {sign}[{bits-1}:0] {prefix}_c{i} = "
                           f"{prefix.upper()}_C{i}[{prefix}_index];"]
             lines += [""]
-        residuals = [f"$signed({extend(name+'_'+op+'_d',value_q-b,9,True)})"
+        residuals = [f"$signed({extend(name+'_'+op+'_d',value_q-b-dropped,7,True)})"
                      for op, b in zip(OPS, index_widths)]
         lines += [f"    // {name.upper()}内で演算を選択し、共有カーネルの幅へ明示的に拡張する。",
-                  f"    wire signed [8:0] {name}_d =",
+                  f"    wire signed [6:0] {name}_d =",
                   f"        select_exp   ? {residuals[0]} :",
                   f"        select_recip ? {residuals[1]} :",
                   f"                       {residuals[2]};"]
-        for i, w in enumerate((14, 11)):
+        for i, w in enumerate((14, 9)):
             values = [extend(f"{name}_{op}_c{i}", width(quantized[op][i], i == 1), w, i == 1)
                       for op in OPS]
             if i == 1:
@@ -181,19 +182,16 @@ module FP16BF16ExpRecipRsqrtStudy #(
                       f"        select_recip ? {values[1]} :",
                       f"                       {values[2]};"]
     lines += """
-    // 4. 一つの9×11乗算器で、一次近似y=c0+RNE(d*c1)を計算する
+    // 4. 一つの7×9乗算器で、一次近似y=c0+floor(d*c1)を計算する
     // 小数点位置は形式ごとに維持し、符号拡張だけで共有乗算器へ渡す。
-    wire signed [8:0] d = use_bf16 ? bf16_d : fp16_d;
+    wire signed [6:0] d = use_bf16 ? bf16_d : fp16_d;
     wire [13:0] c0 = use_bf16 ? bf16_c0 : fp16_c0;
-    wire signed [10:0] c1 = use_bf16 ? bf16_c1 : fp16_c1;
-    wire signed [19:0] product = d * c1;
-    // 積はFP16: Q22、BF16: Q14。9／5 bit右へRNEしてc0と同じQ13／Q9に戻す。
-    // signedの上位sliceは負の積を負方向へ切り下げる。そこへRNEの1 bitを加える。
-    wire product_round = use_bf16 ? (product[4] & ((|product[3:0]) | product[5]))
-                                : (product[8] & ((|product[7:0]) | product[9]));
-    wire signed [15:0] product_high = use_bf16 ? $signed({product[19], product[19:5]})
-                                            : $signed({{5{product[19]}}, product[19:9]});
-    wire signed [15:0] correction = product_high + $signed({15'd0, product_round});
+    wire signed [8:0] c1 = use_bf16 ? bf16_c1 : fp16_c1;
+    wire signed [15:0] product = d * c1;
+    // 積はFP16: Q18、BF16: Q13。5／4 bit右へ切り下げ、c0と同じQ13／Q9に戻す。
+    // signedの上位sliceは負方向へのfloor。最終出力ではRNEする。
+    wire signed [15:0] correction = use_bf16 ? $signed({{4{product[15]}}, product[15:4]})
+                                          : $signed({{5{product[15]}}, product[15:5]});
     wire signed [15:0] polynomial = $signed({2'd0, c0}) + correction;
     // recip(m=1)、rsqrt(m=1かつ偶数指数)は近似せず、厳密な1を選択する。
     wire exact_root = !select_exp & (~|root_fraction) & (select_recip | !parity);
@@ -229,16 +227,16 @@ module FP16BF16ExpRecipRsqrtStudy #(
                   f"        {{{shift}'d0, {previous}[12:{shift+1}], (|{previous}[{shift}:0])}} : {previous};"]
         previous = signal
     lines += """    // pack_grs[12:2]が保持部、[1]がguard、[0]がsticky。最終RNEは一度だけ。
-    wire [11:0] packed_m = {1'b0, pack_grs[12:2]} + {11'd0, (pack_grs[1] & (pack_grs[0] | pack_grs[2]))};
-    wire pack_carry = use_bf16 ? packed_m[8] : packed_m[11];
-    wire signed [9:0] packed_e = (near_underflow ? 10'sd1 : biased_before) + $signed({9'd0, pack_carry});
-    wire [9:0] packed_fraction = use_bf16 ? {3'd0, (pack_carry ? packed_m[7:1] : packed_m[6:0])}
-                                       : (pack_carry ? packed_m[10:1] : packed_m[9:0]);
+    // 現行係数・残差幅では、RNE後も仮数が2に達しないことを全入力で確認する。
+    // min normalへの繰上げは隠れbitへ反映し、normalの指数carryとは区別する。
+    wire [10:0] packed_m = pack_grs[12:2] + {10'd0, (pack_grs[1] & (pack_grs[0] | pack_grs[2]))};
+    wire signed [9:0] packed_e = near_underflow ? 10'sd1 : biased_before;
+    wire [9:0] packed_fraction = use_bf16 ? {3'd0, packed_m[6:0]} : packed_m[9:0];
     // 正のInf: BF16=0x7f80、FP16=0x7c00。qNaN: BF16=0x7fc0、FP16=0x7e00。
     wire [14:0] inf = use_bf16 ? 15'd32640 : 15'd31744;
     wire [15:0] nan = use_bf16 ? 16'd32704 : 16'd32256;
     wire [14:0] normal_payload = use_bf16 ? {packed_e[7:0], packed_fraction[6:0]} : {packed_e[4:0], packed_fraction};
-    wire tiny_result = packed_m < (use_bf16 ? 12'd128 : 12'd1024);
+    wire tiny_result = packed_m < (use_bf16 ? 11'd128 : 11'd1024);
     wire [14:0] finite_payload = SUPPORT_SUBNORMAL && near_underflow && tiny_result ?
                                 {5'd0, packed_fraction} :
                                 (biased_before < 10'sd0 || tiny_result) ? 15'd0
