@@ -1,7 +1,7 @@
 # FP16／BF16 Exp / Reciprocal / Rsqrt
 
 FP16／BF16のexp、reciprocal、rsqrtを、共通の区分一次近似で計算する
-組合せ演算器の試作です。一つのRTLで、二形式の実行時切替と形式固定の両方を扱います。
+組合せ演算器です。一つのRTLで、二形式の実行時切替と形式固定の両方を扱います。
 
 - 三機能は `exp(x)`、`1/x`、`1/sqrt(x)`。
 - 入出力は16 bit。形式は `is_bf16`、演算は3-bit one-hotの `op` で指定。
@@ -121,10 +121,13 @@ RTLの計算には含みません。
 
 ## テスト
 
-以下は、このREADMEがある `studies/fp16_bf16_exp_recip_rsqrt/` で実行します。
+以下は、このREADMEがある `fp16_bf16_exp_recip_rsqrt/` で実行します。
 
 ```sh
 # 整数モデルの精度・単調性・丸めなどを検査
+make model-test
+
+# 整数モデルと既定設定のRTLを検査
 make test
 
 # 生成RTLとの一致とlint
@@ -144,6 +147,11 @@ make rtl-test SUPPORT_SUBNORMAL=0
 # モデル検査と形式3設定×subnormal 2設定のRTL全数検査
 make rtl-test-all
 ```
+
+他の演算器と同じ `lint`、`constants-check`、`exhaustive`、`monotonic` も使用できます。
+`exhaustive` はモデル検査と6設定のRTL全数検査、`monotonic` はモデルの全入力検査を実行します。
+リポジトリ直下では、例えば `make exhaustive-fp16_bf16_exp_recip_rsqrt` と指定します。
+互換性のため、module名 `FP16BF16ExpRecipRsqrtStudy` と従来の `rtl-*` targetは維持します。
 
 `reference.cpp` は近似モデルから独立したbinary128演算で参照値を求め、
 FP32やdoubleを中継せず対象形式へ直接RNEします。
@@ -378,4 +386,4 @@ clockを持たないため、入力から出力までの組合せパスに遅延
 
 Copyright 2026 Ryota Shioya and Toru Koizumi
 
-Apache License 2.0で公開します。詳細は [LICENSE](../../LICENSE) を参照してください。
+Apache License 2.0で公開します。詳細は [LICENSE](../LICENSE) を参照してください。

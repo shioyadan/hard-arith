@@ -8,7 +8,8 @@
 
 ## 実装済みの演算
 
-各公開トップは、clockなしのIEEE 754 binary32入出力を持つ組合せ回路です。
+各公開トップはclockなしの組合せ回路です。入出力形式はFP32（IEEE 754 binary32）、
+またはFP16（binary16）／BF16です。
 
 | ディレクトリ | 演算 | 精度保証 | subnormal | 単調性 |
 |---|---|---|---|---|
@@ -18,13 +19,18 @@
 | [`fp32_rsqrt/`](fp32_rsqrt/) | `1/sqrt(x)` | 正のnormal入力でfaithful | subnormal入力はFTZ | `+0`から`+Inf`まで単調非増加 |
 | [`fp32_elementary/`](fp32_elementary/) | `1/x`、`sqrt(x)`、`1/sqrt(x)`、`sin(pi*x)`、`cos(pi*x)`、`log2(x)`、`2^x`の選択出力 | 関数別のULP／絶対誤差条件 | 入出力ともFTZ | exp2は全入力で違反0。sqrt／rsqrtは縮約全数検査で最大1 ULPの逆行あり。詳細は各READMEを参照 |
 | [`fp32_exp_recip_rsqrt/`](fp32_exp_recip_rsqrt/) | `exp(x)`、`1/x`、`1/sqrt(x)`の選択出力 | normal結果でRNE参照値から最大1 ULP | 入出力ともFTZ | 各演算の定義域で保持 |
+| [`fp16_bf16_exp_recip_rsqrt/`](fp16_bf16_exp_recip_rsqrt/) | FP16／BF16の`exp(x)`、`1/x`、`1/sqrt(x)`の選択出力 | 有限非zero結果でRNE参照値から最大1 step | 入出力とも対応。parameterでFTZも選択可能 | 各演算の定義域で保持 |
 
 faithfulは、無限精度の値を挟む二つのbinary32値のどちらかを返すことを意味します。
 単調非減少では入力を増やしたときに出力が減らず、単調非増加では出力が増えません。
 丸めによって異なる入力が同じ出力になる場合があるため、等しい場合も許します。
 
-各演算ディレクトリは、直下に合成対象のRTL、`test/`に検証コード、
-`tools/`に実装固有の生成スクリプトを持ちます。NaN、Inf、符号付きzeroなどの特殊値、
+FP16／BF16版は形式の実行時切替に加えて、parameterによるFP16専用・BF16専用設定に対応します。
+最大1 stepは、対象形式へ正しく丸めた参照値との表現可能な値の間隔であり、faithfulの保証ではありません。
+
+FP32の各演算ディレクトリは、直下に合成対象のRTL、`test/`に検証コード、
+`tools/`に実装固有の生成スクリプトを持ちます。FP16／BF16版は`rtl/`にRTL、
+直下に検証コードと生成スクリプトを置きます。NaN、Inf、符号付きzeroなどの特殊値、
 丸めの適用範囲、アルゴリズムの詳細は各ディレクトリの`README.md`を参照してください。
 
 ## 検証
@@ -71,6 +77,11 @@ make exhaustive-active-fp32_exp_recip_rsqrt
 make exhaustive-fp32_exp_recip_rsqrt
 make monotonic-fp32_exp_recip_rsqrt
 make constants-check-fp32_exp_recip_rsqrt
+make lint-fp16_bf16_exp_recip_rsqrt
+make test-fp16_bf16_exp_recip_rsqrt
+make exhaustive-fp16_bf16_exp_recip_rsqrt
+make monotonic-fp16_bf16_exp_recip_rsqrt
+make constants-check-fp16_bf16_exp_recip_rsqrt
 ```
 
 ## Dev container
