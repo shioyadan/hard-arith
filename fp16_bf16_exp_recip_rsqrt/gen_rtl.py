@@ -34,7 +34,7 @@ def extend(signal, bits, target, signed=False):
     return "{" + "{" + str(target-bits) + "{" + upper + "}}, " + signal + "}"
 
 
-def grs(signal, bits, shift, retained):
+def grs(signal, bits, shift, retained, sticky=None):
     """定数shiftの保持bit／guard／stickyを連結し、可変幅の加算を作らない。"""
     assert shift > 0
     high_bits = max(0, bits-shift)
@@ -44,7 +44,8 @@ def grs(signal, bits, shift, retained):
     elif high_bits < retained:
         high = "{" + f"{retained-high_bits}'d0" + (", " + high if high_bits else "") + "}"
     guard = f"{signal}[{shift-1}]" if shift <= bits else "1'b0"
-    sticky = f"(|{signal}[{min(bits,shift-1)-1}:0])" if shift > 1 else "1'b0"
+    if sticky is None:
+        sticky = f"(|{signal}[{min(bits,shift-1)-1}:0])" if shift > 1 else "1'b0"
     return "{" + f"{high}, {guard}, {sticky}" + "}"
 
 
@@ -103,18 +104,21 @@ module FP16BF16ExpRecipRsqrtStudy #(
     wire [25:0] exp_product = mantissa * 15'd23637;
     // 指数による倍率を反映し、zをFP16ではQ13、BF16ではQ9へ丸める。
     // shift量はFP16: 26-指数field、BF16: 142-指数field。減算せず直接decodeする。
-    // exp_grs={保持する21 bit, guard, sticky}。各枝では配線だけを選択する。
-    wire [22:0] exp_grs;""".splitlines()
-    # |x|<128の有効範囲では右shiftだけ。保持bit・guard・stickyを選んで一度丸める。
-    expr = "23'd0"
-    for shift in range(5, 27):
+    // exp_grs={保持する19 bit, guard, sticky}。各枝では配線だけを選択する。
+    wire [20:0] exp_grs;""".splitlines()
+    # FP16は|x|<32、BF16は|x|<128だけが有効。保持部・guard・stickyを一度丸める。
+    expr = "21'd0"
+    for shift in range(7, 27):
+        # 定数23637は奇数なので、積と仮数の下位zero条件は一致する。
+        # 暗黙1を含む11 bit以上をORする枝ではstickyは常に1。
+        sticky = "1'b1" if shift >= 12 else f"(|mantissa[{shift-2}:0])"
         selected = f"(use_bf16 ? (x[14:7] == 8'd{142-shift}) : (x[14:10] == 5'd{26-shift}))"
-        expr = f"{selected} ?\n            {grs('exp_product',26,shift,21)} :\n        " + expr
+        expr = f"{selected} ?\n            {grs('exp_product',26,shift,19,sticky)} :\n        " + expr
     lines += ["    assign exp_grs =\n        " + expr + ";"]
     lines += """    // RNEの繰上げ条件はguard && (sticky || 保持部LSB)。tieは偶数側へ丸める。
-    wire [20:0] exp_magnitude =
-        exp_grs[22:2] + {20'd0, (exp_grs[1] & (exp_grs[0] | exp_grs[2]))};
-    wire signed [21:0] exp_z =
+    wire [18:0] exp_magnitude =
+        exp_grs[20:2] + {18'd0, (exp_grs[1] & (exp_grs[0] | exp_grs[2]))};
+    wire signed [19:0] exp_z =
         x[15] ? -$signed({1'b0, exp_magnitude}) : $signed({1'b0, exp_magnitude});
 
     // 近似に使うtの下位bitは、根系ではm-1、expではfrac(z)を表す。
@@ -201,7 +205,7 @@ module FP16BF16ExpRecipRsqrtStudy #(
     // 根系の非厳密点は[0.5,1)。expの1未満の値も、出力RNEでは必ず1へ丸まる。
     // 全入力の丸め・FTZ照合により、近似結果を待たずに正規化位置を決められる。
     wire signed [2:0] normalization = (select_exp | exact_root) ? 3'sd0 : -3'sd1;
-    wire signed [8:0] exp_scale = use_bf16 ? $signed(exp_z[17:9]) : $signed(exp_z[21:13]);
+    wire signed [8:0] exp_scale = use_bf16 ? $signed(exp_z[17:9]) : $signed({{2{exp_z[19]}}, exp_z[19:13]});
     // exp: floor(z)、recip: -e、rsqrt: -floor(e/2)を復元する。
     wire signed [8:0] scale = select_exp ? exp_scale : select_recip ? -root_e : -(root_e >>> 1);
     wire signed [9:0] biased_before = $signed({scale[8], scale}) + (use_bf16 ? 10'sd127 : 10'sd15)
@@ -243,10 +247,10 @@ module FP16BF16ExpRecipRsqrtStudy #(
                               : (packed_e >= (use_bf16 ? 10'sd255 : 10'sd31)) ? inf : normal_payload;
 
     // 6. 特殊値と無効opの選択（近似結果より優先する）
-    // expの|x|>=128は両形式ともoverflow／FTZとなり、近似経路を使わない。
+    // FP16の|x|>=32、BF16の|x|>=128はInf／zeroとなり、近似経路を使わない。
     wire is_nan = exponent_all_ones & !fraction_zero;
     wire negative_rsqrt = select_rsqrt & x[15] & !input_zero;
-    wire exp_large = input_e >= 9'sd7;
+    wire exp_large = use_bf16 ? (input_e >= 9'sd7) : (input_e >= 9'sd5);
     // exp(±0)=1: BF16=0x3f80、FP16=0x3c00。
     wire [15:0] exp_result = exponent_zero ? (use_bf16 ? 16'd16256 : 16'd15360)
                            : exp_large ? (x[15] ? 16'd0 : {1'b0, inf}) : {1'b0, finite_payload};

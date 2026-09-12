@@ -114,7 +114,7 @@ class IntegerModelTests(unittest.TestCase):
                 np.testing.assert_array_equal(fixed, pack(y, q, scale, f), err_msg=f"{f}: {op}")
 
     def test_shared_runtime_datapath(self):
-        from gen_rtl import generate
+        from gen_rtl import PROFILES, generate
 
         rtl = generate()
         self.assertIn("input wire is_bf16", rtl)
@@ -132,6 +132,40 @@ class IntegerModelTests(unittest.TestCase):
         self.assertNotIn("y_ge_two", rtl)
         self.assertNotIn("pack_carry", rtl)
         self.assertIn("wire [10:0] packed_m =", rtl)
+        self.assertIn("wire [18:0] exp_magnitude =", rtl)
+        self.assertIn("wire signed [19:0] exp_z =", rtl)
+        self.assertIn("exp_scale = use_bf16 ? $signed(exp_z[17:9]) : "
+                      "$signed({{2{exp_z[19]}}, exp_z[19:13]});", rtl)
+        self.assertIn("exp_large = use_bf16 ? (input_e >= 9'sd7) : (input_e >= 9'sd5);", rtl)
+        self.assertNotIn("(|exp_product[", rtl)
+
+        # 奇数定数積のstickyは入力仮数から計算できる。暗黙1とtieも含める。
+        mantissa = np.arange(1024, 2048, dtype=np.int64)
+        for shift in range(7, 27):
+            mask = (1 << (shift-1)) - 1
+            product_sticky = ((mantissa * 23637) & mask) != 0
+            input_sticky = np.ones_like(mantissa, dtype=bool) if shift >= 12 else (mantissa & mask) != 0
+            np.testing.assert_array_equal(input_sticky, product_sticky, err_msg=f"shift={shift}")
+
+        for fi, (f, (q, _), _) in enumerate(PROFILES.values()):
+            bias = (1 << (14-f)) - 1
+            inf = ((1 << (15-f))-1) << f
+            limit = (bias + (5 if f == 10 else 7)) << f  # FP16: 32、BF16: 128。
+            bits = np.arange(1 << f, limit, dtype=np.int64)
+            mantissa = ((1 << f) + (bits & ((1 << f)-1))) << (10-f)
+            shift = 24 - q - ((bits >> f) - bias)
+            self.assertGreaterEqual(int(shift.min()), 7)
+            magnitude = rne(mantissa * 23637, shift)
+            self.assertTrue(np.all((magnitude >= 0) & (magnitude < (1 << 19))), f)
+            # decodeしない小入力の枝では、近似前の絶対値がzeroへ丸まる。
+            self.assertTrue(np.all(magnitude[shift > 26] == 0), f)
+            # 範囲外の正負全有限入力は、subnormal ON/OFFでもInf／zeroで正しい。
+            for refs in (self.refs, self.subnormal_refs):
+                np.testing.assert_array_equal(refs[fi, 0, limit:inf], np.full(inf-limit, inf))
+                np.testing.assert_array_equal(refs[fi, 0, (0x8000 | limit):(0x8000 | inf)],
+                                              np.zeros(inf-limit))
+        # 早期分岐によって、本来残るsubnormalをflushしてはいけない。
+        self.assertEqual(int(self.subnormal_refs[0, 0, 0xcc00]), 2)  # FP16 exp(-16)。
 
     def test_readable_rtl_layout(self):
         from gen_rtl import generate

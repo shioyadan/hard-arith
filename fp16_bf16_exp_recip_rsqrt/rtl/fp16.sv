@@ -52,58 +52,54 @@ module FP16BF16ExpRecipRsqrtStudy #(
     wire [25:0] exp_product = mantissa * 15'd23637;
     // 指数による倍率を反映し、zをFP16ではQ13、BF16ではQ9へ丸める。
     // shift量はFP16: 26-指数field、BF16: 142-指数field。減算せず直接decodeする。
-    // exp_grs={保持する21 bit, guard, sticky}。各枝では配線だけを選択する。
-    wire [22:0] exp_grs;
+    // exp_grs={保持する19 bit, guard, sticky}。各枝では配線だけを選択する。
+    wire [20:0] exp_grs;
     assign exp_grs =
         (use_bf16 ? (x[14:7] == 8'd116) : (x[14:10] == 5'd0)) ?
-            {{21'd0}, exp_product[25], (|exp_product[24:0])} :
+            {{19'd0}, exp_product[25], 1'b1} :
         (use_bf16 ? (x[14:7] == 8'd117) : (x[14:10] == 5'd1)) ?
-            {{20'd0, exp_product[25:25]}, exp_product[24], (|exp_product[23:0])} :
+            {{18'd0, exp_product[25:25]}, exp_product[24], 1'b1} :
         (use_bf16 ? (x[14:7] == 8'd118) : (x[14:10] == 5'd2)) ?
-            {{19'd0, exp_product[25:24]}, exp_product[23], (|exp_product[22:0])} :
+            {{17'd0, exp_product[25:24]}, exp_product[23], 1'b1} :
         (use_bf16 ? (x[14:7] == 8'd119) : (x[14:10] == 5'd3)) ?
-            {{18'd0, exp_product[25:23]}, exp_product[22], (|exp_product[21:0])} :
+            {{16'd0, exp_product[25:23]}, exp_product[22], 1'b1} :
         (use_bf16 ? (x[14:7] == 8'd120) : (x[14:10] == 5'd4)) ?
-            {{17'd0, exp_product[25:22]}, exp_product[21], (|exp_product[20:0])} :
+            {{15'd0, exp_product[25:22]}, exp_product[21], 1'b1} :
         (use_bf16 ? (x[14:7] == 8'd121) : (x[14:10] == 5'd5)) ?
-            {{16'd0, exp_product[25:21]}, exp_product[20], (|exp_product[19:0])} :
+            {{14'd0, exp_product[25:21]}, exp_product[20], 1'b1} :
         (use_bf16 ? (x[14:7] == 8'd122) : (x[14:10] == 5'd6)) ?
-            {{15'd0, exp_product[25:20]}, exp_product[19], (|exp_product[18:0])} :
+            {{13'd0, exp_product[25:20]}, exp_product[19], 1'b1} :
         (use_bf16 ? (x[14:7] == 8'd123) : (x[14:10] == 5'd7)) ?
-            {{14'd0, exp_product[25:19]}, exp_product[18], (|exp_product[17:0])} :
+            {{12'd0, exp_product[25:19]}, exp_product[18], 1'b1} :
         (use_bf16 ? (x[14:7] == 8'd124) : (x[14:10] == 5'd8)) ?
-            {{13'd0, exp_product[25:18]}, exp_product[17], (|exp_product[16:0])} :
+            {{11'd0, exp_product[25:18]}, exp_product[17], 1'b1} :
         (use_bf16 ? (x[14:7] == 8'd125) : (x[14:10] == 5'd9)) ?
-            {{12'd0, exp_product[25:17]}, exp_product[16], (|exp_product[15:0])} :
+            {{10'd0, exp_product[25:17]}, exp_product[16], 1'b1} :
         (use_bf16 ? (x[14:7] == 8'd126) : (x[14:10] == 5'd10)) ?
-            {{11'd0, exp_product[25:16]}, exp_product[15], (|exp_product[14:0])} :
+            {{9'd0, exp_product[25:16]}, exp_product[15], 1'b1} :
         (use_bf16 ? (x[14:7] == 8'd127) : (x[14:10] == 5'd11)) ?
-            {{10'd0, exp_product[25:15]}, exp_product[14], (|exp_product[13:0])} :
+            {{8'd0, exp_product[25:15]}, exp_product[14], 1'b1} :
         (use_bf16 ? (x[14:7] == 8'd128) : (x[14:10] == 5'd12)) ?
-            {{9'd0, exp_product[25:14]}, exp_product[13], (|exp_product[12:0])} :
+            {{7'd0, exp_product[25:14]}, exp_product[13], 1'b1} :
         (use_bf16 ? (x[14:7] == 8'd129) : (x[14:10] == 5'd13)) ?
-            {{8'd0, exp_product[25:13]}, exp_product[12], (|exp_product[11:0])} :
+            {{6'd0, exp_product[25:13]}, exp_product[12], 1'b1} :
         (use_bf16 ? (x[14:7] == 8'd130) : (x[14:10] == 5'd14)) ?
-            {{7'd0, exp_product[25:12]}, exp_product[11], (|exp_product[10:0])} :
+            {{5'd0, exp_product[25:12]}, exp_product[11], 1'b1} :
         (use_bf16 ? (x[14:7] == 8'd131) : (x[14:10] == 5'd15)) ?
-            {{6'd0, exp_product[25:11]}, exp_product[10], (|exp_product[9:0])} :
+            {{4'd0, exp_product[25:11]}, exp_product[10], (|mantissa[9:0])} :
         (use_bf16 ? (x[14:7] == 8'd132) : (x[14:10] == 5'd16)) ?
-            {{5'd0, exp_product[25:10]}, exp_product[9], (|exp_product[8:0])} :
+            {{3'd0, exp_product[25:10]}, exp_product[9], (|mantissa[8:0])} :
         (use_bf16 ? (x[14:7] == 8'd133) : (x[14:10] == 5'd17)) ?
-            {{4'd0, exp_product[25:9]}, exp_product[8], (|exp_product[7:0])} :
+            {{2'd0, exp_product[25:9]}, exp_product[8], (|mantissa[7:0])} :
         (use_bf16 ? (x[14:7] == 8'd134) : (x[14:10] == 5'd18)) ?
-            {{3'd0, exp_product[25:8]}, exp_product[7], (|exp_product[6:0])} :
+            {{1'd0, exp_product[25:8]}, exp_product[7], (|mantissa[6:0])} :
         (use_bf16 ? (x[14:7] == 8'd135) : (x[14:10] == 5'd19)) ?
-            {{2'd0, exp_product[25:7]}, exp_product[6], (|exp_product[5:0])} :
-        (use_bf16 ? (x[14:7] == 8'd136) : (x[14:10] == 5'd20)) ?
-            {{1'd0, exp_product[25:6]}, exp_product[5], (|exp_product[4:0])} :
-        (use_bf16 ? (x[14:7] == 8'd137) : (x[14:10] == 5'd21)) ?
-            {exp_product[25:5], exp_product[4], (|exp_product[3:0])} :
-        23'd0;
+            {exp_product[25:7], exp_product[6], (|mantissa[5:0])} :
+        21'd0;
     // RNEの繰上げ条件はguard && (sticky || 保持部LSB)。tieは偶数側へ丸める。
-    wire [20:0] exp_magnitude =
-        exp_grs[22:2] + {20'd0, (exp_grs[1] & (exp_grs[0] | exp_grs[2]))};
-    wire signed [21:0] exp_z =
+    wire [18:0] exp_magnitude =
+        exp_grs[20:2] + {18'd0, (exp_grs[1] & (exp_grs[0] | exp_grs[2]))};
+    wire signed [19:0] exp_z =
         x[15] ? -$signed({1'b0, exp_magnitude}) : $signed({1'b0, exp_magnitude});
 
     // 近似に使うtの下位bitは、根系ではm-1、expではfrac(z)を表す。
@@ -267,7 +263,7 @@ module FP16BF16ExpRecipRsqrtStudy #(
     // 根系の非厳密点は[0.5,1)。expの1未満の値も、出力RNEでは必ず1へ丸まる。
     // 全入力の丸め・FTZ照合により、近似結果を待たずに正規化位置を決められる。
     wire signed [2:0] normalization = (select_exp | exact_root) ? 3'sd0 : -3'sd1;
-    wire signed [8:0] exp_scale = use_bf16 ? $signed(exp_z[17:9]) : $signed(exp_z[21:13]);
+    wire signed [8:0] exp_scale = use_bf16 ? $signed(exp_z[17:9]) : $signed({{2{exp_z[19]}}, exp_z[19:13]});
     // exp: floor(z)、recip: -e、rsqrt: -floor(e/2)を復元する。
     wire signed [8:0] scale = select_exp ? exp_scale : select_recip ? -root_e : -(root_e >>> 1);
     wire signed [9:0] biased_before = $signed({scale[8], scale}) + (use_bf16 ? 10'sd127 : 10'sd15)
@@ -311,10 +307,10 @@ module FP16BF16ExpRecipRsqrtStudy #(
                               : (packed_e >= (use_bf16 ? 10'sd255 : 10'sd31)) ? inf : normal_payload;
 
     // 6. 特殊値と無効opの選択（近似結果より優先する）
-    // expの|x|>=128は両形式ともoverflow／FTZとなり、近似経路を使わない。
+    // FP16の|x|>=32、BF16の|x|>=128はInf／zeroとなり、近似経路を使わない。
     wire is_nan = exponent_all_ones & !fraction_zero;
     wire negative_rsqrt = select_rsqrt & x[15] & !input_zero;
-    wire exp_large = input_e >= 9'sd7;
+    wire exp_large = use_bf16 ? (input_e >= 9'sd7) : (input_e >= 9'sd5);
     // exp(±0)=1: BF16=0x3f80、FP16=0x3c00。
     wire [15:0] exp_result = exponent_zero ? (use_bf16 ? 16'd16256 : 16'd15360)
                            : exp_large ? (x[15] ? 16'd0 : {1'b0, inf}) : {1'b0, finite_payload};
