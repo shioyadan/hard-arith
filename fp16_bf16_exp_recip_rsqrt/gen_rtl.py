@@ -116,10 +116,12 @@ module FP16BF16ExpRecipRsqrtStudy #(
         expr = f"{selected} ?\n            {grs('exp_product',26,shift,19,sticky)} :\n        " + expr
     lines += ["    assign exp_grs =\n        " + expr + ";"]
     lines += """    // RNEの繰上げ条件はguard && (sticky || 保持部LSB)。tieは偶数側へ丸める。
-    wire [18:0] exp_magnitude =
-        exp_grs[20:2] + {18'd0, (exp_grs[1] & (exp_grs[0] | exp_grs[2]))};
+    wire exp_round_up = exp_grs[1] & (exp_grs[0] | exp_grs[2]);
+    // aを保持整数、bを丸め増分とすると、負側は-(a+b)=~a+(1-b)。
+    // 丸め加算の後に符号反転せず、bit反転と一つのcarry加算で符号付きRNEを作る。
+    wire [19:0] exp_signed_base = {1'b0, exp_grs[20:2]} ^ {20{x[15]}};
     wire signed [19:0] exp_z =
-        x[15] ? -$signed({1'b0, exp_magnitude}) : $signed({1'b0, exp_magnitude});
+        $signed(exp_signed_base) + $signed({19'd0, (exp_round_up ^ x[15])});
 
     // 近似に使うtの下位bitは、根系ではm-1、expではfrac(z)を表す。
     // 有効な小数部はFP16: t[12:0] (Q13)、BF16: t[8:0] (Q9)。

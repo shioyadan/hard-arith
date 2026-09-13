@@ -132,7 +132,19 @@ class IntegerModelTests(unittest.TestCase):
         self.assertNotIn("y_ge_two", rtl)
         self.assertNotIn("pack_carry", rtl)
         self.assertIn("wire [10:0] packed_m =", rtl)
-        self.assertIn("wire [18:0] exp_magnitude =", rtl)
+        self.assertNotIn("exp_magnitude", rtl)
+        self.assertIn("wire [19:0] exp_signed_base =", rtl)
+        # 符号付きRNEの統合は、保持値の丸めoverflowがない範囲で同値。
+        held = np.arange(1 << 19, dtype=np.int64)
+        for guard in (0, 1):
+            for sticky in (0, 1):
+                increment = guard & (sticky | (held & 1))
+                valid = held + increment < (1 << 19)
+                for sign in (0, 1):
+                    original = (1 - 2*sign) * (held + increment)
+                    merged = (held ^ (sign * ((1 << 20)-1))) + (increment ^ sign)
+                    merged = ((merged + (1 << 19)) & ((1 << 20)-1)) - (1 << 19)
+                    np.testing.assert_array_equal(original[valid], merged[valid])
         self.assertIn("wire signed [19:0] exp_z =", rtl)
         self.assertIn("exp_scale = use_bf16 ? $signed(exp_z[17:9]) : "
                       "$signed({{2{exp_z[19]}}, exp_z[19:13]});", rtl)
