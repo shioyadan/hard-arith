@@ -198,8 +198,7 @@ module FP32ElementaryTB;
                      exact_count[function_index], max_ulp[function_index],
                      max_abs_error_units[function_index],
                      monotonic_violations[function_index]);
-            if (function_index != 5 && function_index != 6
-                && monotonic_violations[function_index] != 0)
+            if (monotonic_violations[function_index] != 0)
                 $fatal(1, "単調性違反: op=%h count=%0d",
                        16'(1 << function_index),
                        monotonic_violations[function_index]);

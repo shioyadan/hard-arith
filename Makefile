@@ -19,13 +19,17 @@ EXHAUSTIVE_ACTIVE_UNITS := fp32_exp fp32_exp2 fp32_elementary fp32_exp_recip_rsq
 EXHAUSTIVE_ACTIVE_TARGETS := $(addprefix exhaustive-active-,$(EXHAUSTIVE_ACTIVE_UNITS))
 MONOTONIC_TARGETS := $(addprefix monotonic-,$(MONOTONIC_UNITS))
 
-.PHONY: all lint test exhaustive exhaustive-active monotonic clean constants-check
+.PHONY: all lint test exhaustive exhaustive-active monotonic clean constants-check \
+	test-configs-fp32_elementary
 
 all: test
 
 lint: $(LINT_TARGETS)
 
 test: $(TEST_TARGETS)
+
+test-configs-fp32_elementary:
+	$(MAKE) -C fp32_elementary test-configs
 
 exhaustive: $(EXHAUSTIVE_TARGETS)
 

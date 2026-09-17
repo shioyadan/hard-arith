@@ -4,7 +4,14 @@
 // IEEE 754 binary32の2^x、1/x、1/sqrt(x)、sqrt(x)、log2(x)、
 // sin(pi*x)、cos(pi*x)を一つの二次近似datapathで求める組合せ回路。
 // subnormal入出力はFTZとし、opはone-hotで指定する。
-module FP32Elementary(
+module FP32Elementary #(
+    parameter bit ENABLE_EXP2   = 1'b1,
+    parameter bit ENABLE_RECIP  = 1'b1,
+    parameter bit ENABLE_RSQRT  = 1'b1,
+    parameter bit ENABLE_SQRT   = 1'b1,
+    parameter bit ENABLE_LOG2   = 1'b1,
+    parameter bit ENABLE_SINCOS = 1'b1
+)(
     input  wire [31:0] x,
     input  wire [6:0]  op,
     output wire [31:0] result
@@ -141,7 +148,7 @@ module FP32Elementary(
         24'd9321940, 24'd9526603, 24'd9730298, 24'd9933039, // 40 .. 43
         24'd10134839, 24'd10335706, 24'd10535663, 24'd10734718, // 44 .. 47
         24'd10932882, 24'd11130166, 24'd11326579, 24'd11522140, // 48 .. 51
-        24'd11716857, 24'd11910741, 24'd12103801, 24'd12296047, // 52 .. 55
+        24'd11716857, 24'd11910741, 24'd12103800, 24'd12296047, // 52 .. 55
         24'd12487486, 24'd12678137, 24'd12868006, 24'd13057101, // 56 .. 59
         24'd13245432, 24'd13433008, 24'd13619838, 24'd13805926 // 60 .. 63
     };
@@ -584,53 +591,53 @@ module FP32Elementary(
 
     localparam [1:0] sine_c0_q24_prefix = 2'b00;
     localparam [23:0] sine_c0_q24_suffix [0:63] = '{
-        24'd205882, 24'd617524, 24'd1028793, 24'd1439442, // 0 .. 3
-        24'd1849220, 24'd2257889, 24'd2665197, 24'd3070900, // 4 .. 7
-        24'd3474754, 24'd3876514, 24'd4275935, 24'd4672785, // 8 .. 11
-        24'd5066821, 24'd5457800, 24'd5845495, 24'd6229671, // 12 .. 15
-        24'd6610089, 24'd6986529, 24'd7358758, 24'd7726559, // 16 .. 19
-        24'd8089701, 24'd8447975, 24'd8801155, 24'd9149035, // 20 .. 23
-        24'd9491404, 24'd9828059, 24'd10158791, 24'd10483404, // 24 .. 27
-        24'd10801702, 24'd11113494, 24'd11418588, 24'd11716808, // 28 .. 31
-        24'd12007971, 24'd12291900, 24'd12568422, 24'd12837377, // 32 .. 35
-        24'd13098596, 24'd13351929, 24'd13597216, 24'd13834312, // 36 .. 39
-        24'd14063075, 24'd14283368, 24'd14495057, 24'd14698015, // 40 .. 43
-        24'd14892120, 24'd15077256, 24'd15253310, 24'd15420171, // 44 .. 47
-        24'd15577749, 24'd15725939, 24'd15864657, 24'd15993824, // 48 .. 51
-        24'd16113352, 24'd16223175, 24'd16323226, 24'd16413444, // 52 .. 55
-        24'd16493772, 24'd16564170, 24'd16624590, 24'd16674992, // 56 .. 59
-        24'd16715350, 24'd16745645, 24'd16765849, 24'd16775953 // 60 .. 63
+        24'd411734, 24'd823220, 24'd1234209, 24'd1644454, // 0 .. 3
+        24'd2053713, 24'd2461731, 24'd2868265, 24'd3273072, // 4 .. 7
+        24'd3675907, 24'd4076534, 24'd4474699, 24'd4870169, // 8 .. 11
+        24'd5262704, 24'd5652076, 24'd6038037, 24'd6420362, // 12 .. 15
+        24'd6798823, 24'd7173183, 24'd7543228, 24'd7908724, // 16 .. 19
+        24'd8269461, 24'd8625210, 24'd8975771, 24'd9320923, // 20 .. 23
+        24'd9660461, 24'd9994179, 24'd10321871, 24'd10643351, // 24 .. 27
+        24'd10958420, 24'd11266888, 24'd11568572, 24'd11863284, // 28 .. 31
+        24'd12150851, 24'd12431096, 24'd12703858, 24'd12968963, // 32 .. 35
+        24'd13226260, 24'd13475585, 24'd13716797, 24'd13949746, // 36 .. 39
+        24'd14174293, 24'd14390300, 24'd14597640, 24'd14796186, // 40 .. 43
+        24'd14985817, 24'd15166424, 24'd15337894, 24'd15500127, // 44 .. 47
+        24'd15653021, 24'd15796489, 24'd15930439, 24'd16054793, // 48 .. 51
+        24'd16169478, 24'd16274422, 24'd16369563, 24'd16454844, // 52 .. 55
+        24'd16530216, 24'd16595627, 24'd16651044, 24'd16696427, // 56 .. 59
+        24'd16731755, 24'd16757003, 24'd16772159, 24'd16777215 // 60 .. 63
     };
 
     localparam [0:0] sine_c1_q15_prefix = 1'b0;
     localparam [16:0] sine_c1_q15_suffix [0:63] = '{
-        17'd102934, 17'd102872, 17'd102748, 17'd102562, // 0 .. 3
-        17'd102314, 17'd102005, 17'd101634, 17'd101202, // 4 .. 7
-        17'd100710, 17'd100156, 17'd99542, 17'd98868, // 8 .. 11
-        17'd98135, 17'd97342, 17'd96491, 17'd95582, // 12 .. 15
-        17'd94615, 17'd93591, 17'd92511, 17'd91375, // 16 .. 19
-        17'd90184, 17'd88939, 17'd87640, 17'd86288, // 20 .. 23
-        17'd84884, 17'd83430, 17'd81924, 17'd80370, // 24 .. 27
-        17'd78767, 17'd77117, 17'd75420, 17'd73678, // 28 .. 31
-        17'd71892, 17'd70062, 17'd68190, 17'd66277, // 32 .. 35
-        17'd64324, 17'd62332, 17'd60303, 17'd58237, // 36 .. 39
-        17'd56137, 17'd54002, 17'd51835, 17'd49637, // 40 .. 43
-        17'd47409, 17'd45152, 17'd42868, 17'd40558, // 44 .. 47
-        17'd38224, 17'd35867, 17'd33488, 17'd31089, // 48 .. 51
-        17'd28671, 17'd26236, 17'd23786, 17'd21320, // 52 .. 55
-        17'd18842, 17'd16353, 17'd13854, 17'd11346, // 56 .. 59
-        17'd8832, 17'd6312, 17'd3789, 17'd1263 // 60 .. 63
+        17'd102918, 17'd102824, 17'd102668, 17'd102450, // 0 .. 3
+        17'd102178, 17'd101837, 17'd101434, 17'd100970, // 4 .. 7
+        17'd100445, 17'd99868, 17'd99222, 17'd98516, // 8 .. 11
+        17'd97750, 17'd96934, 17'd96051, 17'd95110, // 12 .. 15
+        17'd94119, 17'd93063, 17'd91959, 17'd90791, // 16 .. 19
+        17'd89576, 17'd88298, 17'd86976, 17'd85600, // 20 .. 23
+        17'd84173, 17'd82694, 17'd81156, 17'd79578, // 24 .. 27
+        17'd77951, 17'd76277, 17'd74564, 17'd72798, // 28 .. 31
+        17'd70988, 17'd69134, 17'd67246, 17'd65309, // 32 .. 35
+        17'd63340, 17'd61324, 17'd59279, 17'd57197, // 36 .. 39
+        17'd55081, 17'd52930, 17'd50747, 17'd48533, // 40 .. 43
+        17'd46288, 17'd44016, 17'd41716, 17'd39398, // 44 .. 47
+        17'd37048, 17'd34683, 17'd32296, 17'd29881, // 48 .. 51
+        17'd27455, 17'd25012, 17'd22553, 17'd20080, // 52 .. 55
+        17'd17602, 17'd15105, 17'd12606, 17'd10090, // 56 .. 59
+        17'd7576, 17'd5048, 17'd2525, 17'd0 // 60 .. 63
     };
 
     localparam [0:0] sine_c2_q5_prefix = 1'b1;
     localparam [7:0] sine_c2_q5_suffix [0:63] = '{
         8'd254, 8'd250, 8'd246, 8'd242, // 0 .. 3
         8'd239, 8'd235, 8'd231, 8'd227, // 4 .. 7
-        8'd223, 8'd219, 8'd216, 8'd212, // 8 .. 11
+        8'd223, 8'd220, 8'd216, 8'd212, // 8 .. 11
         8'd208, 8'd205, 8'd201, 8'd197, // 12 .. 15
         8'd194, 8'd190, 8'd187, 8'd183, // 16 .. 19
         8'd180, 8'd176, 8'd173, 8'd170, // 20 .. 23
-        8'd167, 8'd163, 8'd160, 8'd157, // 24 .. 27
+        8'd167, 8'd164, 8'd160, 8'd157, // 24 .. 27
         8'd154, 8'd151, 8'd149, 8'd146, // 28 .. 31
         8'd143, 8'd140, 8'd138, 8'd135, // 32 .. 35
         8'd133, 8'd130, 8'd128, 8'd126, // 36 .. 39
@@ -638,19 +645,20 @@ module FP32Elementary(
         8'd116, 8'd114, 8'd112, 8'd111, // 44 .. 47
         8'd109, 8'd108, 8'd107, 8'd105, // 48 .. 51
         8'd104, 8'd103, 8'd102, 8'd101, // 52 .. 55
-        8'd101, 8'd100, 8'd99, 8'd99, // 56 .. 59
+        8'd101, 8'd100, 8'd100, 8'd99, // 56 .. 59
         8'd99, 8'd98, 8'd98, 8'd98 // 60 .. 63
     };
 
 // END GENERATED ELEMENTARY TABLES
 
-    wire select_recip = op == OP_RECIP;
-    wire select_sqrt = op == OP_SQRT;
-    wire select_rsqrt = op == OP_RSQRT;
-    wire select_sinpi = op == OP_SINPI;
-    wire select_cospi = op == OP_COSPI;
-    wire select_log2 = op == OP_LOG2;
-    wire select_exp2 = op == OP_EXP2;
+    // op全体を比較し、無効な関数のbitを含む複数bit指定も不正のまま扱う。
+    wire select_recip = ENABLE_RECIP & (op == OP_RECIP);
+    wire select_sqrt = ENABLE_SQRT & (op == OP_SQRT);
+    wire select_rsqrt = ENABLE_RSQRT & (op == OP_RSQRT);
+    wire select_sinpi = ENABLE_SINCOS & (op == OP_SINPI);
+    wire select_cospi = ENABLE_SINCOS & (op == OP_COSPI);
+    wire select_log2 = ENABLE_LOG2 & (op == OP_LOG2);
+    wire select_exp2 = ENABLE_EXP2 & (op == OP_EXP2);
 
     wire        x_sign = x[31];
     wire [7:0]  x_exponent = x[30:23];
@@ -715,8 +723,9 @@ module FP32Elementary(
     wire sine_argument_is_half = sine_argument_q23 == 23'h400000;
     wire [5:0] sine_table_index = sine_argument_is_half
         ? 6'd63 : sine_argument_q23[21:16];
-    wire signed [15:0] sine_delta_q23 =
-        $signed({~sine_argument_q23[15], sine_argument_q23[14:0]});
+    // sin/cosは区間右端を基準にする。負の残差と非負の内側係数で逆行を防ぐ。
+    wire signed [16:0] sine_delta_q23 =
+        $signed({1'b1, sine_argument_q23[15:0]});
     wire sine_result_sign = selected_phase[23]^(x_sign&select_sinpi);
 
     // funcごとの係数bankと差分を選び、二つの乗算だけでHorner評価する。
@@ -724,7 +733,8 @@ module FP32Elementary(
         ? {{1{mantissa_delta_m7_q23[16]}}, mantissa_delta_m7_q23, 1'b0}
         : select_sqrt | select_log2 ? {mantissa_delta_m6_q23, 1'b0}
         : select_exp2 ? exp2_delta_q24
-        : {{2{sine_delta_q23[15]}}, sine_delta_q23, 1'b0};
+        : ENABLE_SINCOS ? {sine_delta_q23[16], sine_delta_q23, 1'b0}
+        : 19'sd0;
 
     // 各bankで共通する上位bitはtableに置かず、読み出し時に再連結する。
     wire signed [28:0] reciprocal_c0_q27_value = $signed({
@@ -819,57 +829,54 @@ module FP32Elementary(
         sine_c2_q5_prefix, sine_c2_q5_suffix[sine_table_index], 4'b0
     });
 
+    // sin/cos無効時はデフォルト入力も定数にし、使わないtable・位相還元を残さない。
     wire signed [28:0] coefficient_c0_q27 = select_recip
         ? reciprocal_c0_q27_value
         : select_sqrt ? sqrt_c0_q27_value
         : select_rsqrt ? rsqrt_c0_q27_value
         : select_log2 ? log2_c0_q27_value
         : select_exp2 ? exp2_c0_q27_value
-        : sine_c0_q27_value;
+        : ENABLE_SINCOS ? sine_c0_q27_value : 29'sd0;
     wire signed [19:0] coefficient_c1_q17 = select_recip
         ? reciprocal_c1_q17_value
         : select_sqrt ? sqrt_c1_q17_value
         : select_rsqrt ? rsqrt_c1_q17_value
         : select_log2 ? log2_c1_q17_value
         : select_exp2 ? exp2_c1_q17_value
-        : sine_c1_q17_value;
+        : ENABLE_SINCOS ? sine_c1_q17_value : 20'sd0;
     wire signed [12:0] coefficient_c2_q9 = select_recip
         ? reciprocal_c2_q9_value
         : select_sqrt ? sqrt_c2_q9_value
         : select_rsqrt ? rsqrt_c2_q9_value
         : select_log2 ? log2_c2_q9_value
         : select_exp2 ? exp2_c2_q9_value
-        : sine_c2_q9_value;
+        : ENABLE_SINCOS ? sine_c2_q9_value : 13'sd0;
 
     wire signed [31:0] inner_product_q33 =
         polynomial_delta_q24*coefficient_c2_q9;
     wire signed [32:0] inner_product_biased_q33 =
         $signed({inner_product_q33[31], inner_product_q33})
-        + (select_exp2 ? 33'sd16384 : 33'sd32768);
-    wire signed [13:0] inner_correction_exp_q18 =
-        inner_product_biased_q33[28:15];
-    wire signed [12:0] inner_correction_reduced_q17 =
-        inner_product_biased_q33[28:16];
-    wire signed [13:0] inner_correction_q18 = select_exp2
-        ? inner_correction_exp_q18
-        : $signed({inner_correction_reduced_q17, 1'b0});
+        + 33'sd16384;
+    // 全関数をQ18に揃え、根系の内側丸めの段差も小さくする。
+    wire signed [14:0] inner_correction_q18 =
+        inner_product_biased_q33[29:15];
     wire signed [20:0] coefficient_c1_q18 =
         $signed({coefficient_c1_q17, 1'b0});
     wire signed [20:0] inner_q18 = coefficient_c1_q18
-        + {{7{inner_correction_q18[13]}}, inner_correction_q18};
+        + {{6{inner_correction_q18[14]}}, inner_correction_q18};
     wire signed [39:0] outer_product_q42 = polynomial_delta_q24*inner_q18;
     wire signed [40:0] outer_product_biased_q42 =
         $signed({outer_product_q42[39], outer_product_q42})
         + (select_exp2 ? 41'sd16384 : 41'sd65536);
     wire signed [21:0] outer_correction_exp_q27 =
         outer_product_biased_q42[36:15];
-    wire signed [19:0] outer_correction_reduced_q25 =
-        outer_product_biased_q42[36:17];
-    wire signed [21:0] outer_correction_q27 = select_exp2
-        ? outer_correction_exp_q27
+    wire signed [20:0] outer_correction_reduced_q25 =
+        outer_product_biased_q42[37:17];
+    wire signed [22:0] outer_correction_q27 = select_exp2
+        ? {outer_correction_exp_q27[21], outer_correction_exp_q27}
         : $signed({outer_correction_reduced_q25, 2'b0});
     wire signed [28:0] polynomial_q27 = coefficient_c0_q27
-        + {{7{outer_correction_q27[21]}}, outer_correction_q27};
+        + {{6{outer_correction_q27[22]}}, outer_correction_q27};
 
     // 数学的に厳密な格子点は近似をbypassする。
     wire reciprocal_exact = x_fraction_zero;

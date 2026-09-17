@@ -52,10 +52,14 @@ def tune_row(
     c0_fraction_bits: int,
     c1_fraction_bits: int,
     c2_fraction_bits: int,
+    right_endpoint: bool = False,
+    direction: int = 0,
 ):
     _, coefficient_c1, coefficient_c2 = chebyshev_quadratic(
-        function, center, half_width
+        function, center-half_width if right_endpoint else center, half_width
     )
+    if right_endpoint:
+        coefficient_c1 += 2*half_width*coefficient_c2
     center_c1 = round(coefficient_c1*(1 << c1_fraction_bits))
     center_c2 = round(coefficient_c2*(1 << c2_fraction_bits))
     half_integer = round(half_width*(1 << DELTA_FRACTION_BITS))
@@ -68,6 +72,8 @@ def tune_row(
             for sample in range(GRID_DIVISIONS+1)
         ),
     }), dtype=np.int64)
+    if right_endpoint:
+        samples -= half_integer
     exact = np.array([
         function(center+int(delta)*2.0**-DELTA_FRACTION_BITS)
         for delta in samples
@@ -81,24 +87,134 @@ def tune_row(
             center_c2-QUADRATIC_SEARCH_RADIUS,
             center_c2+QUADRATIC_SEARCH_RADIUS+1,
         ):
-            inner = c1+round_signed_shift_array(
+            # 右端基準ではd<=0。内側の値とその段差を逆符号にして逆行を防ぐ。
+            if direction and (direction*c1 < 0 or direction*c2 > 0):
+                continue
+            inner_bits = C1_FRACTION_BITS+1 if right_endpoint else c1_fraction_bits
+            output_bits = (REDUCED_C0_FRACTION_BITS
+                           if right_endpoint else c0_fraction_bits)
+            inner = (c1 << (inner_bits-c1_fraction_bits))+round_signed_shift_array(
                 samples*c2,
-                DELTA_FRACTION_BITS+c2_fraction_bits-c1_fraction_bits,
+                DELTA_FRACTION_BITS+c2_fraction_bits-inner_bits,
             )
             correction = round_signed_shift_array(
                 samples*inner,
-                DELTA_FRACTION_BITS+c1_fraction_bits-c0_fraction_bits,
+                DELTA_FRACTION_BITS+inner_bits-output_bits,
             )
-            ideal_c0 = exact*(1 << c0_fraction_bits)-correction
+            ideal_c0 = (exact*(1 << c0_fraction_bits)
+                        - correction*2.0**(c0_fraction_bits-output_bits))
             center_c0 = round((float(ideal_c0.min())+float(ideal_c0.max()))/2)
+            if right_endpoint:
+                center_c0 = min(center_c0, (1 << c0_fraction_bits)-1)
             for c0 in range(center_c0-2, center_c0+3):
+                # 右端基準はsin用。極値近傍もC0<1とし、共通prefixを維持する。
+                if right_endpoint and not 0 <= c0 < (1 << c0_fraction_bits):
+                    continue
                 maximum_error = float(np.max(np.abs(
-                    (c0+correction)*2.0**-c0_fraction_bits-exact
+                    c0*2.0**-c0_fraction_bits+correction*2.0**-output_bits-exact
                 )))
                 if best is None or maximum_error < best[0]:
                     best = (maximum_error, c0, c1, c2)
     assert best is not None
     return best[1], best[2], best[3], best[0]
+
+
+def choose_monotonic_path(domains, direction, endpoint):
+    """各行の候補から、境界と最後の厳密点まで単調な最小変更列を選ぶ。"""
+    if not domains or direction not in (-1, 1):
+        raise ValueError("空のtableまたは不正な単調方向です")
+    states = [(0, [])]
+    for candidates in domains:
+        next_states = []
+        for candidate in candidates:
+            compatible = [state for state in states if not state[1]
+                          or direction*(candidate[1]-state[1][-1][2]) >= 0]
+            if compatible:
+                cost, path = min(compatible, key=lambda state: state[0])
+                next_states.append((cost+candidate[3], path+[candidate]))
+        if not next_states:
+            raise ValueError("table境界を単調にするC0列がありません")
+        states = next_states
+    states = [state for state in states
+              if direction*(endpoint-state[1][-1][2]) >= 0]
+    if not states:
+        raise ValueError("最終境界を単調にするC0列がありません")
+    _, path = min(states, key=lambda state: state[0])
+    return path
+
+
+def make_monotonic_rows(
+    name, function, count, interval, base, bits, direction, right_endpoint=False,
+):
+    """Q18中間値の全残差と最終丸めを検査し、境界も単調になる係数列を選ぶ。"""
+    c0_bits, c1_bits, c2_bits = bits
+    half_integer = round(interval*(1 << (DELTA_FRACTION_BITS-1)))
+    delta = np.arange(-half_integer, half_integer, dtype=np.int64)
+    if right_endpoint:
+        delta -= half_integer
+    domains = []
+    rows = []
+    for index in range(count):
+        center = base+(index+(1 if right_endpoint else 0.5))*interval
+        row = tune_row(
+            function, center, interval/2, *bits, right_endpoint=right_endpoint,
+            direction=direction if right_endpoint else 0,
+        )
+        c0, c1, c2, _ = row
+        rows.append(row)
+        inner = (c1 << (C1_FRACTION_BITS+1-c1_bits))+round_signed_shift_array(
+            delta*c2, DELTA_FRACTION_BITS+c2_bits-(C1_FRACTION_BITS+1),
+        )
+        correction = round_signed_shift_array(
+            delta*inner,
+            DELTA_FRACTION_BITS+(C1_FRACTION_BITS+1)-REDUCED_C0_FRACTION_BITS,
+        )
+        # binary64は探索用。採用後は独立した整数／高精度参照でRTLを全数検査する。
+        exact = np.array([function(center+int(d)*2.0**-DELTA_FRACTION_BITS)
+                          for d in delta])
+        reference = exact.astype(np.float32).view(np.uint32).astype(np.int64)
+        if base == 0:
+            arguments = center+delta*2.0**-DELTA_FRACTION_BITS
+            lower_reference = np.array([
+                function(max(0.0, float(x)-2.0**-24)) for x in arguments])
+            upper_reference = np.array([
+                function(min(0.5, float(x)+2.0**-24)) for x in arguments])
+        candidates = []
+        for candidate_c0 in range(c0-4, c0+5):
+            c0_limit = 1 << (c0_bits if right_endpoint else c0_bits+1)
+            if not 0 <= candidate_c0 < c0_limit:
+                continue
+            fixed = (candidate_c0 << (REDUCED_C0_FRACTION_BITS-c0_bits))+correction
+            output = (fixed*2.0**-REDUCED_C0_FRACTION_BITS).astype(np.float32)
+            # 多項式を通らない厳密点も隣接判定に含める。
+            if index == 0 and (base == 0 or function(base) == 1):
+                output[0] = function(base)
+            if np.any(direction*np.diff(output.astype(np.float64)) < 0):
+                continue
+            error = float(np.max(np.abs(output.astype(np.float64)-exact)))
+            if base == 0:
+                # Q23位相cellの両端まで検査する。極値付近にpiの最大勾配を課さない。
+                error = max(float(np.max(np.abs(output-lower_reference))),
+                            float(np.max(np.abs(output-upper_reference))))
+                good = error <= 4*2.0**-23
+            else:
+                good = np.max(np.abs(
+                    output.view(np.uint32).astype(np.int64)-reference)) <= 1
+            if good:
+                candidates.append((candidate_c0, float(output[0]), float(output[-1]),
+                                   abs(candidate_c0-c0), error))
+        if not candidates:
+            raise SystemExit(f"{name}の区間{index}に精度と単調性を満たすC0がありません")
+        domains.append(candidates)
+
+    # 最終行から次のbinade／sinの極値への接続も検査する。
+    endpoint = float(np.float32(function(base+count*interval)))
+    try:
+        path = choose_monotonic_path(domains, direction, endpoint)
+    except ValueError as error:
+        raise SystemExit(f"{name}: {error}") from error
+    return [(candidate[0], row[1], row[2], candidate[4])
+            for row, candidate in zip(rows, path)]
 
 
 def binary32_q(bits, fraction_bits: int):
@@ -284,6 +400,8 @@ def validate_datapath_ranges(
         half_integer+int(include_upper_endpoint),
         dtype=np.int64,
     )
+    if name == "sine":
+        delta -= half_integer
     if name == "exp2":
         limits = {
             "inner_product": (-(1 << 31), (1 << 31)-1),
@@ -296,41 +414,43 @@ def validate_datapath_ranges(
     else:
         limits = {
             "inner_product": (-(1 << 31), (1 << 31)-1),
-            "inner_correction": (-(1 << 12), (1 << 12)-1),
-            "inner": (-(1 << 19), (1 << 19)-1),
+            "inner_correction": (-(1 << 14), (1 << 14)-1),
+            "inner": (-(1 << 20), (1 << 20)-1),
             "outer_product": (-(1 << 39), (1 << 39)-1),
-            "outer_correction": (-(1 << 19), (1 << 19)-1),
+            "outer_correction": (-(1 << 20), (1 << 20)-1),
             "polynomial": (-(1 << 26), (1 << 26)-1),
         }
     observed = {key: [None, None] for key in limits}
+    # 非exp2の入力格子もRTLのQ24へ揃え、実際の積の宣言幅と比較する。
+    datapath_delta = delta << (EXP2_DELTA_FRACTION_BITS-delta_fraction_bits)
 
     for c0, c1, c2, _ in rows:
         c2_q9 = c2 << (C2_FRACTION_BITS-c2_fraction_bits)
-        inner_product = delta*c2_q9
+        inner_product = datapath_delta*c2_q9
         if name == "exp2":
             c1_value = c1 << 1
             inner_correction = round_signed_shift_array(
                 inner_product,
-                delta_fraction_bits+C2_FRACTION_BITS-c1_fraction_bits,
+                EXP2_DELTA_FRACTION_BITS+C2_FRACTION_BITS-c1_fraction_bits,
             )
             inner = c1_value+inner_correction
-            outer_product = delta*inner
+            outer_product = datapath_delta*inner
             outer_correction = round_signed_shift_array(
                 outer_product,
-                delta_fraction_bits+c1_fraction_bits-c0_fraction_bits,
+                EXP2_DELTA_FRACTION_BITS+c1_fraction_bits-c0_fraction_bits,
             )
             polynomial = c0+outer_correction
         else:
-            c1_value = c1 << (C1_FRACTION_BITS-c1_fraction_bits)
+            c1_value = c1 << (C1_FRACTION_BITS+1-c1_fraction_bits)
             inner_correction = round_signed_shift_array(
                 inner_product,
-                delta_fraction_bits+C2_FRACTION_BITS-C1_FRACTION_BITS,
+                EXP2_DELTA_FRACTION_BITS+C2_FRACTION_BITS-(C1_FRACTION_BITS+1),
             )
             inner = c1_value+inner_correction
-            outer_product = delta*inner
+            outer_product = datapath_delta*inner
             outer_correction = round_signed_shift_array(
                 outer_product,
-                delta_fraction_bits+C1_FRACTION_BITS
+                EXP2_DELTA_FRACTION_BITS+(C1_FRACTION_BITS+1)
                 - REDUCED_C0_FRACTION_BITS,
             )
             polynomial = (
@@ -424,11 +544,18 @@ def append_tables(
 
 def generate_block() -> str:
     reciprocal = make_rows(lambda value: 1.0/value, 128, 1.0/128)
-    sqrt_base = make_rows(math.sqrt, 64, 1.0/64)
-    sqrt_scaled = make_rows(lambda value: math.sqrt(2.0*value), 64, 1.0/64)
-    rsqrt_base = make_rows(lambda value: 1.0/math.sqrt(value), 128, 1.0/128)
-    rsqrt_scaled = make_rows(
-        lambda value: 1.0/math.sqrt(2.0*value), 128, 1.0/128
+    root_bits = (REDUCED_C0_FRACTION_BITS, C1_FRACTION_BITS, REDUCED_C2_FRACTION_BITS)
+    sqrt_base = make_monotonic_rows(
+        "sqrt_base", math.sqrt, 64, 1.0/64, 1.0, root_bits, 1)
+    sqrt_scaled = make_monotonic_rows(
+        "sqrt_scaled", lambda value: math.sqrt(2.0*value),
+        64, 1.0/64, 1.0, root_bits, 1)
+    rsqrt_base = make_monotonic_rows(
+        "rsqrt_base", lambda value: 1.0/math.sqrt(value),
+        128, 1.0/128, 1.0, root_bits, -1)
+    rsqrt_scaled = make_monotonic_rows(
+        "rsqrt_scaled", lambda value: 1.0/math.sqrt(2.0*value),
+        128, 1.0/128, 1.0, root_bits, -1
     )
     log2 = make_rows(
         math.log2, 64, 1.0/64,
@@ -437,13 +564,10 @@ def generate_block() -> str:
         c2_fraction_bits=LOG2_C2_FRACTION_BITS,
     )
     exp2 = make_exp2_rows()
-    sine = make_centered_rows(
-        lambda value: math.sin(math.pi*value),
-        [(index+0.5)/128.0 for index in range(64)],
-        1.0/256,
-        SINE_C0_FRACTION_BITS,
-        SINE_C1_FRACTION_BITS,
-        SINE_C2_FRACTION_BITS,
+    sine = make_monotonic_rows(
+        "sine", lambda value: math.sin(math.pi*value),
+        64, 1.0/128, 0.0,
+        (SINE_C0_FRACTION_BITS, SINE_C1_FRACTION_BITS, SINE_C2_FRACTION_BITS), 1, True,
     )
 
     for (name, rows, half_integer, c0_fraction_bits, c2_fraction_bits,

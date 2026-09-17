@@ -926,15 +926,14 @@ Exp2Metrics run_exp2(ModelPool& pool, int threads, bool full) {
 
 template <typename Function>
 Metrics timed_run(
-    std::string_view name, Function&& function, bool& pass,
-    bool monotonic_required = true) {
+    std::string_view name, Function&& function, bool& pass) {
     const auto begin = std::chrono::steady_clock::now();
     Metrics metrics = function();
     const double seconds = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - begin).count();
     report(name, metrics, seconds);
     pass &= metrics.violations == 0
-         && (!monotonic_required || metrics.monotonic_violations == 0);
+         && metrics.monotonic_violations == 0;
     return metrics;
 }
 
@@ -965,10 +964,10 @@ int main(int argc, char** argv) {
         timed_run("log2", [&] { return run_log2(pool, threads); }, pass);
         timed_run("sinpi", [&] {
             return run_sine_or_cosine(pool, threads, false);
-        }, pass, false);
+        }, pass);
         timed_run("cospi", [&] {
             return run_sine_or_cosine(pool, threads, true);
-        }, pass, false);
+        }, pass);
 
         const auto boundary_begin = std::chrono::steady_clock::now();
         const std::vector<Metrics> boundary =

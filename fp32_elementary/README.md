@@ -22,8 +22,11 @@ fp32_elementary/
 ├── Makefile
 ├── test/
 │   ├── exhaustive.cpp
+│   ├── function_enables.cpp
 │   ├── reference.c
-│   └── tb_fp32_elementary.sv
+│   ├── tb_function_enables.sv
+│   ├── tb_fp32_elementary.sv
+│   └── test_constants.py
 └── tools/
     └── gen_constants.py
 ```
@@ -34,7 +37,14 @@ fp32_elementary/
 ## インターフェース
 
 ```systemverilog
-module FP32Elementary(
+module FP32Elementary #(
+    parameter bit ENABLE_EXP2   = 1'b1,
+    parameter bit ENABLE_RECIP  = 1'b1,
+    parameter bit ENABLE_RSQRT  = 1'b1,
+    parameter bit ENABLE_SQRT   = 1'b1,
+    parameter bit ENABLE_LOG2   = 1'b1,
+    parameter bit ENABLE_SINCOS = 1'b1
+)(
     input  wire [31:0] x,
     input  wire [6:0]  op,
     output wire [31:0] result
@@ -55,8 +65,8 @@ module FP32Elementary(
 | `7'b1000000` | `cos(pi*x)` |
 
 clock、reset、valid、ready、例外flag、NaN payload保持、動的な丸めモード入力は
-ありません。未定義の`op`、または複数bitが立った`op`にはcanonical quiet NaNを
-返します。
+ありません。未定義の`op`、複数bitが立った`op`、または無効にした関数の`op`には
+canonical quiet NaN `0x7fc00000`を返します。
 
 ```systemverilog
 FP32Elementary u_elementary (
@@ -65,6 +75,33 @@ FP32Elementary u_elementary (
     .result(result)
 );
 ```
+
+### 合成時の機能選択
+
+六つの`ENABLE_*`パラメータは合成時に固定する設定です。既定値はすべて1で、
+七機能を使えます。0にした関数の専用table、引数還元、結果選択は不要となり、
+合成時の定数伝播で除去できます。sinpiとcospiは同じtableと演算経路を使うため、
+`ENABLE_SINCOS`で一括して有効・無効を指定します。
+
+例えば、`2^x`、逆数、逆平方根だけを残す場合は次のようにします。
+
+```systemverilog
+FP32Elementary #(
+    .ENABLE_SQRT(1'b0),
+    .ENABLE_LOG2(1'b0),
+    .ENABLE_SINCOS(1'b0)
+) u_elementary (
+    .x(x), .op(op), .result(result)
+);
+```
+
+`op`の幅と符号化は変わりません。有効な関数の計算結果、FTZ・特殊値・丸め・
+誤差条件も全機能構成と同じです。無効な関数のbitを含む複数bit指定も不正な`op`であり、
+有効なbitだけを取り出して演算することはありません。全パラメータを0にした構成も
+許可し、すべての入力にcanonical quiet NaNを返します。
+
+共通datapathは残した関数間で共有するため、面積は機能数に比例して減るわけではありません。
+この例の指数関数は自然指数`exp`ではなく`exp2`です。
 
 ## 数値仕様
 
@@ -86,6 +123,10 @@ FP32Elementary u_elementary (
 逆に絶対値の大きい出力ではbinary32の1 ULPが絶対誤差上限より大きくなるため、
 二つの条件の和集合で判定します。`sin(pi*x)`と`cos(pi*x)`も零点近傍では
 ULPが適切な指標にならないため、絶対誤差を使います。
+
+精度条件とは別に単調性も検査します。sqrt／rsqrtは正の定義域、sinpi／cospiは
+増減方向が一定の区間で、隣接入力に対して出力が逆行しないことを合否に含めます。
+周期関数を全実数上で単調とする意味ではありません。
 
 特殊値と定義域外の主な出力は次のとおりです。
 
@@ -119,6 +160,7 @@ hard-arithリポジトリ直下から次を実行します。
 ```sh
 make lint-fp32_elementary
 make test-fp32_elementary
+make test-configs-fp32_elementary
 make exhaustive-fp32_elementary EXHAUSTIVE_THREADS=22
 make constants-check-fp32_elementary
 ```
@@ -128,6 +170,14 @@ make constants-check-fp32_elementary
 
 `make test`は短時間の回帰検査です。関数ごとに特殊値と境界値24入力、
 固定seed 200,000乱数入力をbinary128参照値で検査し、単調区間も200,000点で走査します。
+
+`make test-configs-fp32_elementary`（unit内では`make test-configs`）は六つの設定の
+全64組合せを検査します。全無効・各機能単独・全機能を含め、有効な関数は既定構成と
+bit一致、無効な関数と不正な`op`はcanonical quiet NaNになることを確認します。
+入力は全128通りの`op`と特殊値、関数別の固定seed 20,000乱数、全指数・正負・
+128区分の境界前後、exp2とsin/cosの還元境界で、1,625,816入力・op組を各設定へ与えます。
+計104,052,224比較で不一致0を確認しました。設定は全数ですが、入力空間全体の
+等価性証明ではありません。独立高精度参照による精度検査は`make test`と`make exhaustive`です。
 
 標本数は次のように変更できます。
 
@@ -139,9 +189,8 @@ make test-fp32_elementary RANDOM_CYCLES=1000000 MONOTONIC_SAMPLES=1000000
 検査した後、exp2の全`2^32` bit patternを列挙します。途中で違反を検出しても
 全走査を完了し、最後に失敗を返します。網羅範囲と参照値の作り方は次節に示します。
 
-現在はsqrtとrsqrtの隣接単調性違反が合否に含まれるため、`make exhaustive`と
-`make exhaustive-reduced`は失敗を返します。各関数の精度違反は0、exp2単独の全入力検査は
-`pass=1`ですが、縮約検査全体は`pass=0`です。sinpi/cospiの単調性は診断値として扱います。
+2026-09-17の再検証では、各関数の精度違反・隣接単調性違反とも0で、縮約検査と
+exp2全入力検査の両方が`pass=1`です。sinpi/cospiの単調性も合否に含めています。
 
 短い確認には`make exhaustive-reduced`、exp2の近似本体だけの確認には
 `make exhaustive-active`を使用できます。22 threadでの直近の確認では、exp2の全入力走査は
@@ -157,20 +206,19 @@ binary64参照値を使い、境界、丸め中点付近の459,802入力をbinar
 | 演算 | 網羅した主領域 | 精度違反 | 観測最大 | 隣接単調性違反 |
 |---|---:|---:|---:|---:|
 | `1/x` | 正負を含む16,777,216入力 | 0 | 1 ULP | 0 |
-| `1/sqrt(x)` | 指数偶奇と全仮数16,777,216入力 | 0 | 1 ULP | 110、最大1 ULP |
-| `sqrt(x)` | 指数偶奇と全仮数16,777,216入力 | 0 | 1 ULP | 38、最大1 ULP |
-| `log2(x)` | `0.5 <= x < 2`の全16,777,216入力 | 0 | `1.919171 * 2^-23` | 0 |
-| `sin(pi*x)` | 全4,194,305 Q23還元位相 | 0 | `3.403494 * 2^-23` | 768、最大1 ULP |
-| `cos(pi*x)` | 全4,194,305 Q23還元位相 | 0 | `3.403494 * 2^-23` | 768、最大1 ULP |
+| `1/sqrt(x)` | 指数偶奇と全仮数16,777,216入力 | 0 | 1 ULP | 0 |
+| `sqrt(x)` | 指数偶奇と全仮数16,777,216入力 | 0 | 1 ULP | 0 |
+| `log2(x)` | `0.5 <= x < 2`の全16,777,216入力 | 0 | `1.823170 * 2^-23` | 0 |
+| `sin(pi*x)` | 全4,194,305 Q23還元位相 | 0 | `3.242481 * 2^-23` | 0 |
+| `cos(pi*x)` | 全4,194,305 Q23還元位相 | 0 | `3.242481 * 2^-23` | 0 |
 | `2^x` | 全`2^32`入力 | 0 | 1 ULP | 0 |
 
 全指数fieldとtable境界を組み合わせた各328,192入力では、七関数とも精度違反0でした。
 また、不正な`op` 1,936組合せがすべてcanonical quiet NaNを返すことを確認しました。
 
 `2^x`は有限4,278,190,080入力で最大1 ULP、精度違反0、隣接単調性違反0でした。
-特殊値16,777,216入力の不一致も0でした。sqrtとrsqrtの単調性逆行はそれぞれ38件と
-110件あり、いずれも1 ULPです。
-sinpiとcospiの単調性は絶対誤差仕様の合否には使わず、診断値として記録しています。
+特殊値16,777,216入力の不一致も0でした。sinpiとcospiの還元位相検査では、
+位相をQ23へ丸める前の半LSB範囲も含めて絶対誤差を評価しています。
 
 以上はRTL入力または引数還元後の離散空間を列挙した検査であり、形式証明や
 精度保証付きの計算機援用証明ではありません。exp2以外は全`2^32` bit patternを直接列挙せず、
@@ -182,14 +230,14 @@ sinpiとcospiの単調性は絶対誤差仕様の合否には使わず、診断�
 
 七つの関数を個別に実装すると、各回路がtable、乗算器、丸め回路を持つため、
 機能数にほぼ比例して面積が増えます。一方、各関数の入力を小さな区間へ移し、
-その区間の中心との差`d`を使えば、どの関数も次の同じ二次Horner形で
+その区間の基準点との差`d`を使えば、どの関数も次の同じ二次Horner形で
 近似できます。
 
 ```text
 P(d) = C0+d*(C1+d*C2)
 ```
 
-入力が広いままでは高次項が必要ですが、`|d|`を半区間以下へ縮小すると、
+入力が広いままでは高次項が必要ですが、`d`を十分狭い区間へ縮小すると、
 `d^3`以降の影響が小さくなります。その残差は関数と区間ごとの係数へ織り込み、
 共有する計算本体は二次に抑えます。
 
@@ -235,11 +283,12 @@ x = (-1)^s*M*2^E,  1 <= M < 2
 | `1/sqrt(x)` | `E`の偶奇により`1/sqrt(M)`または`1/sqrt(2*M)`を128区間で近似する | 2 x 128行 |
 | `sqrt(x)` | `E`の偶奇により`sqrt(M)`または`sqrt(2*M)`を64区間で近似する | 2 x 64行 |
 | `log2(x)` | `log2(x)=E+log2(M)`とし、`log2(M)`だけを64区間で近似する | 64行 |
-| `sin(pi*x)` | 周期2の位相を`[0, 0.5]`へ折り返し、64区間で近似する | 64行 |
+| `sin(pi*x)` | 周期2の位相を`[0, 0.5]`へ折り返し、64区間の右端との差を使う | 64行 |
 | `cos(pi*x)` | 位相へ0.5を加え、sinと同じ引数還元とtableを使う | sinと共有 |
 
 `2^x`では`|d| <= 1/128`、sin/cosでは折り返し後の各区間で
-`|d| < 1/256`です。sqrtと逆平方根は、指数の偶奇をtable addressの上位bitへ加え、
+`-1/128 <= d < 0`です。他の関数は区間中央を基準にします。
+sqrtと逆平方根は、指数の偶奇をtable addressの上位bitへ加え、
 後で`2^E`由来のscaleを出力指数へ移します。
 
 #### 2. 共通二次datapath
@@ -255,7 +304,17 @@ value = C0+round(d*inner)
 19 x 21 bitの二回です。係数は関数ごとに必要な精度だけを格納し、左shiftで
 共通のQ27/Q17/Q9へ揃えてから共有datapathへ渡します。reciprocal、sqrt、rsqrtは
 Q25/Q17/Q8、`log2`はQ25/Q16/Q7、`2^x`はQ27/Q17/Q9、sin/cosは
-Q24/Q15/Q5の`C0/C1/C2`を使います。`2^x`のHorner中間値だけはQ18に保ちます。
+Q24/Q15/Q5の`C0/C1/C2`を使います。Horner中間値は全関数でQ18に保ちます。
+
+内側の積を粗く丸めると、連続多項式が単調でも段差による逆行が起こり得ます。
+sqrt／rsqrtでは、既に`2^x`で使うQ18精度を共有し、全残差で最終出力の単調性を
+確認します。中間丸めの関数別切り替えは不要となり、乗算器の幅も増やしません。
+
+sin/cosは極値付近で傾きが0に近いため、Q18化だけでは足りません。そこで右端を
+基準にし、`d <= 0`、`C1 >= 0`、`C2 <= 0`となる係数を選びます。
+`t=-d`とすると、近似値は`C0-t*(C1+round(t*(-C2)))`です。非負の`t`を増やすと
+引かれる積も増えるため、途中丸めを含めて区間内の増減方向がそろいます。
+区間境界と零点・極値のbypassとの接続は、別途検査します。
 
 最後に関数ごとの指数scaleと符号を戻し、共通Q27 packerがleading bitの位置から
 指数と仮数を作ります。`2^scale`の乗算は整数乗算器ではなく出力指数の加減算で実現し、
@@ -272,6 +331,11 @@ Horner演算と中間丸めを含む最大誤差が小さくなるように調�
 出力が区間全体でRNE参照値から1 ULP以内になるQ27の`C0`範囲を逆算します。その範囲内で
 各区間内とtable境界の出力が単調になる`C0`列を選びます。
 
+sqrt／rsqrtも、Q18中間丸めと最終packerを含む全残差で精度・単調性を確認し、
+隣接行が逆行しない`C0`列を動的計画法で選びます。sin/cosは右端基準へ係数を
+変換してから再探索し、Q23位相cellの両端まで含めた絶対誤差を確認します。
+極値に対応する最終行も`C0 < 1`に制限することで、tableの共通prefixを維持します。
+
 係数は合計704行です。各bank内で全行に共通する上位bitを個別の行へ格納せず、
 一つのprefixと行ごとのsuffixに分けます。共通bitを含む係数量は41,216 bit、
 RTLのtableへ実際に格納するsuffixは33,600 bitです。
@@ -284,7 +348,7 @@ RTLのtableへ実際に格納するsuffixは33,600 bitです。
 
 | 信号・係数 | 幅 | 形式 | 役割 |
 |---|---:|---|---|
-| `polynomial_delta_q24` | 19 | signed Q24 | 区間中央からの差`d` |
+| `polynomial_delta_q24` | 19 | signed Q24 | 区間の基準点からの差`d` |
 | `coefficient_c0_q27` | 29 | signed Q27 | 共通形式へ揃えた定数項 |
 | `coefficient_c1_q17` | 20 | signed Q17 | 一次係数 |
 | `coefficient_c2_q9` | 13 | signed Q9 | 共通形式へ揃えた二次係数 |
@@ -301,6 +365,7 @@ RTLのtableへ実際に格納するsuffixは33,600 bitです。
 
 `tools/gen_constants.py`は、各関数の区分二次係数を再生成し、量子化済みHorner演算の
 探索結果、prefix/suffix分割、中間値の範囲をRTLと照合します。
+`constants-check`では、境界候補の選択と極値での逆行防止に関する補助テストも実行します。
 
 ```sh
 make constants-check
