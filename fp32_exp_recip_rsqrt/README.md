@@ -67,6 +67,12 @@ FP32ExpRecipRsqrt u_elem3 (
 );
 ```
 
+## 合成時パラメータ
+
+合成時パラメータはありません。FP32、入出力FTZ、以下の数値仕様で固定です。
+exp／recip／rsqrtは常に三機能を備え、`op`で実行時に選びます。
+機能ごとの`ENABLE_*`、入出力幅・精度・subnormal対応を変更する設定はありません。
+
 ## 数値仕様
 
 normal結果は、無限精度値をround-to-nearest-evenでbinary32へ丸めた参照値から
