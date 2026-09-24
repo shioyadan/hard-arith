@@ -7,8 +7,8 @@ IEEE 754 binary32のbit patternと演算選択を入力し、自然指数関数`
 
 - トップモジュール: `FP32ExpRecipRsqrt`
 - インターフェース: clockなしの32-bit入出力と3-bit one-hot `op`
-- subnormal: 入出力ともFTZ
-- 精度: normal結果はRNE参照値から最大1 ULP
+- subnormal: 合成時に入出力対応を選択（既定はFTZ）
+- 精度: 有限非zero結果はRNE参照値から最大1 step
 - 単調性: 各演算の非NaNな定義域内で保持
 - 共有datapath: signed 18 x unsigned 9 bitとsigned 18 x signed 20 bitの乗算を各1個
 
@@ -23,6 +23,8 @@ fp32_exp_recip_rsqrt/
 │   ├── exhaustive_exp.cpp
 │   ├── exhaustive_recip.cpp
 │   ├── exhaustive_rsqrt.cpp
+│   ├── configs.sv
+│   ├── configs.cpp
 │   ├── monotonic_exp.cpp
 │   ├── monotonic_recip.cpp
 │   ├── monotonic_rsqrt.cpp
@@ -38,7 +40,9 @@ fp32_exp_recip_rsqrt/
 ## インターフェース
 
 ```systemverilog
-module FP32ExpRecipRsqrt (
+module FP32ExpRecipRsqrt #(
+    parameter bit SUPPORT_SUBNORMAL = 1'b0
+) (
     input  wire [31:0] x,
     input  wire [2:0]  op,
     output wire [31:0] result
@@ -69,14 +73,21 @@ FP32ExpRecipRsqrt u_elem3 (
 
 ## 合成時パラメータ
 
-合成時パラメータはありません。FP32、入出力FTZ、以下の数値仕様で固定です。
+| パラメータ | 既定値 | 設定値 | 制御する内容 |
+|---|---:|---|---|
+| `SUPPORT_SUBNORMAL` | `0` | `0` / `1` | `0`: 入出力FTZ、`1`: 入力subnormalの正規化と出力gradual underflow |
+
+`FP32ExpRecipRsqrt #(.SUPPORT_SUBNORMAL(1'b1))`でsubnormal対応を有効にします。
+設定は合成時に固定し、実行時に切り替える信号ではありません。OFF側は従来のFTZ出力を維持します。
 exp／recip／rsqrtは常に三機能を備え、`op`で実行時に選びます。
-機能ごとの`ENABLE_*`、入出力幅・精度・subnormal対応を変更する設定はありません。
+機能ごとの`ENABLE_*`、入出力幅・近似精度を変更する設定はありません。
 
 ## 数値仕様
 
-normal結果は、無限精度値をround-to-nearest-evenでbinary32へ丸めた参照値から
-最大1 ULPとします。この条件は、厳密値を挟む二つのbinary32値のどちらかを返す
+有限非zero結果は、無限精度値をround-to-nearest-evenでbinary32へ丸めた参照値から
+最大1 representable stepとします。subnormal域では1 stepは`2^-149`です。
+OFF側は入出力をFTZとして比較し、normal結果で最大1 ULPです。
+この条件は、厳密値を挟む二つのbinary32値のどちらかを返す
 strict faithful roundingとは同一ではありません。
 
 | 入力または条件 | `exp(x)` | `1/x` | `1/sqrt(x)` |
@@ -85,14 +96,19 @@ strict faithful roundingとは同一ではありません。
 | `+Inf` | `+Inf` | `+0` | `+0` |
 | `-Inf` | `+0` | `-0` | canonical qNaN |
 | `+0` / `-0` | `1.0` | `+Inf` / `-Inf` | `+Inf` / `-Inf` |
-| 入力subnormal | `1.0` | signed zeroとして扱う | signed zeroとして扱う |
-| 出力subnormal | `+0`へflush | signed zeroへflush | 発生しない |
-| 有限値の精度条件 | normal結果で最大1 ULP | normal結果で最大1 ULP | 正のnormal入力で最大1 ULP |
+| 入力subnormal（OFF） | `1.0` | signed zeroとして扱う | signed zeroとして扱う |
+| 入力subnormal（ON） | `1.0` | 非zero値として計算。overflowはsigned Inf | 正は計算、負はcanonical qNaN |
+| 出力subnormal（OFF） | `+0`へflush | signed zeroへflush | 発生しない |
+| 出力subnormal（ON） | 保持 | 保持 | 発生しない |
+
+NaN、Inf、signed zeroの分類は誤差許容とは別に保持します。
+ON側のrecipは入力の絶対値が`0x00200000`以下の非zero subnormalでoverflowし、
+`0x00200001`以上では有限値です。負のsubnormalのrsqrtは、`rsqrt(-0)=-Inf`とは区別します。
 
 `exp`は非NaN入力に対して単調非減少です。`1/x`は零点に極があるため、負領域
 `-Inf`から`-0`と正領域`+0`から`+Inf`を別々に扱い、それぞれで単調非増加です。
-`1/sqrt(x)`は`+0`から`+Inf`まで単調非増加です。負のnormal入力と`-Inf`はNaNを
-返すため、逆平方根の単調性の定義域に含めません。
+`1/sqrt(x)`は`+0`から`+Inf`まで単調非増加です。負の非zero入力と`-Inf`はNaNを
+返すため、逆平方根の単調性の定義域に含めません。ただしOFF側の負subnormal入力はsigned zero扱いです。
 
 ## 必要なツール
 
@@ -115,11 +131,17 @@ make exhaustive-active-fp32_exp_recip_rsqrt EXHAUSTIVE_THREADS=22
 make exhaustive-fp32_exp_recip_rsqrt EXHAUSTIVE_THREADS=22
 make monotonic-fp32_exp_recip_rsqrt MONOTONIC_THREADS=22
 make constants-check-fp32_exp_recip_rsqrt
+make test-configs-fp32_exp_recip_rsqrt
+make test-fp32_exp_recip_rsqrt SUPPORT_SUBNORMAL=1
+make exhaustive-fp32_exp_recip_rsqrt SUPPORT_SUBNORMAL=1 EXHAUSTIVE_THREADS=12
+make monotonic-fp32_exp_recip_rsqrt SUPPORT_SUBNORMAL=1 MONOTONIC_THREADS=8
 ```
 
 `fp32_exp_recip_rsqrt/`内では、それぞれ`make lint`、`make test`、
 `make exhaustive-active`、`make exhaustive`、`make monotonic`、
 `make constants-check`です。
+`SUPPORT_SUBNORMAL=0/1`を指定でき、生成物は`build/subnormal-0/1/`へ分離します。
+`make test-configs`は両設定を同時に検査するため、この設定に依存しません。
 
 `make test`は特殊値、overflow／underflow境界、引数還元境界、table index境界、
 固定seedの各200,000乱数入力をbinary128参照値で検査します。また、各演算から
@@ -136,23 +158,38 @@ make constants-check-fp32_exp_recip_rsqrt
 `make monotonic`は、`exp`ではNaNを除く全4,278,190,081隣接組、根系では
 縮約可能な全隣接仮数と指数境界を検査します。
 
+`make test-configs`は両設定の根系全仮数、正負subnormal全入力、recipの出力subnormal域、
+expの`-87 .. -129`全入力、全指数境界、特殊値、無効opを検査します。
+根系の参照値は整数の商・余り、または128-bit整数の平方比較で作り、
+境界標本ではbinary128参照関数とも照合します。根系のsubnormal域の単調性もここで検査します。
+ON側の`exhaustive`／`exhaustive-active`は、この両設定検査とexp走査を実行します。
+通常経路では両設定のbit一致も確認します。
+
 ## 検証済み精度
 
-固定seed各200,024入力と各200,000単調性標本では次を確認しています。
+固定seed各200,036入力と各200,000単調性標本では次を確認しています。数値の順はOFF／ONです。
 
 | 指標 | `exp(x)` | `1/x` | `1/sqrt(x)` |
 |---|---:|---:|---:|
-| RNE一致 | 172,427 | 159,891 | 158,223 |
+| RNE一致 | 172,439 / 172,267 | 159,903 / 159,529 | 158,234 / 158,232 |
 | RNEからの最大step数 | 1 | 1 | 1 |
 | 単調性標本違反 | 0 | 0 | 0 |
 
-`exp`は全4,294,967,296入力をbinary128 `expq`参照値で検査し、normal結果
+OFF基準版の`exp`は全4,294,967,296入力をbinary128 `expq`参照値で検査し、normal結果
 2,262,834,792入力で最大1 step、FTZ対象1,020,351,408入力とoverflow対象
 995,003,880入力で不一致0でした。非NaN全4,278,190,081隣接組でも単調性違反0です。
 
 逆数は全8,388,607非零仮数、逆平方根は指数偶奇別の全16,777,216仮数を検査し、
 RNE参照値から最大1 stepでした。逆数の全16,777,214隣接仮数と512指数境界、
 逆平方根の全16,777,214隣接仮数と256指数境界でも単調性違反0です。
+
+ON側もexp全4,294,967,296入力で最大1 RNE step、特殊値・zero・overflow分類不一致0、
+非NaN全4,278,190,081隣接組で単調性違反0を確認しました。
+追加した根系の正負subnormal全入力、recipの入力指数field 253／254の全仮数でも、
+最大1 step・分類不一致0・単調性違反0です。OFF側は旧RTLとexp全入力、
+根系の全仮数・全subnormal・指数境界等の検査集合でbit一致しました。
+expの実数誤差の最大値はnormal約1.4635 ULP、subnormal約1.0978 ULPであり、
+RNEから最大1 stepという条件と、実数誤差1 ULP未満やfaithfulとは区別します。
 
 これらはVerilated RTLモデルによる離散入力の列挙検査であり、形式証明や
 精度保証付きの計算機援用証明ではありません。
@@ -219,6 +256,18 @@ E = 2q+p,  p in {0,1}
 係数をbase用とscaled用の2組持ちます。指数値そのものは近似結果に影響せず、
 偶奇だけが係数bankの選択に使われます。
 
+### subnormal入力の正規化
+
+ON側では根系の入力fraction整数`F`を先頭の1まで左shiftします。
+`s=clz23(F)+1`、仮数整数`M=F<<s`、指数`E=-126-s`とすれば、normal入力と同じ
+`1<=m<2`の格子へ戻せます。recip／rsqrtで16／8／4／2／1 bitの段階shiftを共有し、
+正規化後のfractionを既存tableへ渡します。rsqrtの指数偶奇は`s`の最下位bitです。
+表とHorner乗算器の幅は変えません。expのsubnormal入力は常に1へ丸まるため正規化不要です。
+
+recipの小さいsubnormal入力は先にoverflowへ分岐します。残る有限入力のshiftは1／2のみで、
+出力指数は`252+s+exact`です。rsqrtは`189+(s>>1)+(s&1)+exact`となります。
+どちらも8-bit指数経路で足り、通常経路の指数幅を一律には広げません。
+
 ### 共通Hornerデータパス
 
 還元後の三関数を同じ二次式へ揃えます。
@@ -259,7 +308,7 @@ x, op
 `(C0 >> 10)+(1または2)`、Q9のC2は`(C0 >> 19)+(0または1)`で正確に表せるため、
 補正値を示す64-bit maskを各1本だけ保持し、C1/C2のtableは置きません。C1は
 演算時にQ18へ揃えます。Q27からQ24への出力切り詰めに必要な丸めbiasはC0へ
-織り込み、独立した丸め加算器を置きません。table境界で精度または単調性が
+織り込み、Q24生成には独立した丸め加算器を置きません。table境界で精度または単調性が
 厳しい6区間だけC0を調整しています。
 
 根系には`FP32Elementary`と同じQ25/Q17/Q8係数を使います。読み出し時に下位zeroを
@@ -317,7 +366,18 @@ expはC0へ最終biasを織り込んであるので、ここでは切り捨て�
 逆数で`253-B_in+e`、逆平方根で`189-(B_in>>1)+p+e`です。
 逆数の出力FTZ条件は`B_in==254 || (B_in==253 && !e)`へ簡約できます。
 normal入力では根系のoverflowはなく、逆平方根のunderflowもありません。
-zero／subnormal入力のInfや、NaN／負入力の処理は別の特殊値経路で行います。
+zero入力のInf、OFF側subnormalのFTZ、NaN／負入力の処理は別の特殊値経路で行います。
+
+ON側の出力subnormalは通常結果のpackとは分け、共通Q24仮数から作ります。
+recipは入力指数fieldが253／254のとき追加1／2 bitの右shiftとRNEを行い、
+厳密点ではQ24の1.0を使います。既存RNE後の値を再利用する二重丸めですが、
+最終的な最大1 stepと単調性は全仮数で検査しています。Q27から直接丸める回路ではありません。
+
+expはQ24仮数を`-q-125` bit右shiftし、guardとstickyを保持してRNEします。
+`q<-150`はzeroへ飽和させ、5-bit shift量のwrapを防ぎます。
+最小normalへの丸め上がりはpayloadのbit 23で表せます。
+rsqrtでは、全ての正の有限入力に対して結果がnormalの範囲に収まるため、この出力回路は不要です。
+OFF側では追加経路は定数選択によって未使用になります。
 
 ## 定数とテーブルの照合
 
@@ -327,6 +387,7 @@ zero／subnormal入力のInfや、NaN／負入力の処理は別の特殊値経�
 共有datapathの宣言幅に収まることも検査します。
 さらに、根系の固定正規化・丸めcarryなしの条件と、低位判定による統合加算が
 元のC0加算＋丸めに一致することを検査します。
+ON側のrecipの追加丸め幅と、expの深いunderflowをzeroへ飽和できる値域も検査します。
 
 ```sh
 make constants-check

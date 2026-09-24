@@ -24,6 +24,10 @@
 using ExpDut = VFP32ExpRecipRsqrt;
 #include "verilated.h"
 
+#ifndef SUPPORT_SUBNORMAL
+#define SUPPORT_SUBNORMAL 0
+#endif
+
 #ifndef FP32_EXP_ACTIVE_EXPONENT_COUNT
 #define FP32_EXP_ACTIVE_EXPONENT_COUNT 32u
 #endif
@@ -468,7 +472,20 @@ void check_one(
     stats.max_rne_steps = std::max(
         stats.max_rne_steps, distance(output_bits, rounded_bits));
 
-    if (exact == 0.0 || (exact > 0.0 && exact < kMinimumNormal)) {
+    if (SUPPORT_SUBNORMAL) {
+        // ON側ではsubnormalも1 step契約。zero/Inf分類は別に厳密一致を要求する。
+        if (rounded_bits == 0) {
+            ++stats.ftz_checks;
+            if (output_bits != 0) ++stats.ftz_mismatches;
+        } else if (rounded_bits == kPositiveInfinity) {
+            ++stats.overflow_checks;
+            if (output_bits != rounded_bits) ++stats.overflow_mismatches;
+        } else {
+            ++stats.normal_rne_checks;
+            stats.normal_max_rne_steps = std::max(stats.normal_max_rne_steps, distance(output_bits, rounded_bits));
+            if (output_bits == 0 || output_bits >= kPositiveInfinity) ++stats.special_mismatches;
+        }
+    } else if (exact == 0.0 || (exact > 0.0 && exact < kMinimumNormal)) {
         ++stats.ftz_checks;
         if (output_bits != 0) ++stats.ftz_mismatches;
     } else if (std::isinf(exact)) {
@@ -610,6 +627,7 @@ void report(const Options& options, int threads, const Stats& stats) {
               << "mode=" << (options.mode == Mode::full ? "full" : "active")
               << '\n'
               << "threads=" << threads << '\n'
+              << "support_subnormal=" << SUPPORT_SUBNORMAL << '\n'
               << "checks=" << stats.checks << '\n'
               << "finite_checks=" << stats.finite_checks << '\n'
               << "faithful_failures=" << stats.faithful_failures << '\n'

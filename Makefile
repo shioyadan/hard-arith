@@ -20,7 +20,7 @@ EXHAUSTIVE_ACTIVE_TARGETS := $(addprefix exhaustive-active-,$(EXHAUSTIVE_ACTIVE_
 MONOTONIC_TARGETS := $(addprefix monotonic-,$(MONOTONIC_UNITS))
 
 .PHONY: all lint test exhaustive exhaustive-active monotonic clean constants-check \
-	test-configs-fp32_elementary
+	test-configs-fp32_elementary test-configs-fp32_exp_recip_rsqrt
 
 all: test
 
@@ -30,6 +30,9 @@ test: $(TEST_TARGETS)
 
 test-configs-fp32_elementary:
 	$(MAKE) -C fp32_elementary test-configs
+
+test-configs-fp32_exp_recip_rsqrt:
+	$(MAKE) -C fp32_exp_recip_rsqrt test-configs
 
 exhaustive: $(EXHAUSTIVE_TARGETS)
 

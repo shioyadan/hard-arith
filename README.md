@@ -18,14 +18,14 @@
 | [`fp32_recip/`](fp32_recip/) | `1/x` | 結果がnormalとなる範囲でfaithful | 入出力ともFTZ | 負領域・正領域ごとに単調非増加 |
 | [`fp32_rsqrt/`](fp32_rsqrt/) | `1/sqrt(x)` | 正のnormal入力でfaithful | subnormal入力はFTZ | `+0`から`+Inf`まで単調非増加 |
 | [`fp32_elementary/`](fp32_elementary/) | `1/x`、`sqrt(x)`、`1/sqrt(x)`、`sin(pi*x)`、`cos(pi*x)`、`log2(x)`、`2^x`の選択出力 | 関数別のULP／絶対誤差条件 | 入出力ともFTZ | exp2全入力と他関数の縮約全数で逆行0。sin/cosは増減方向が一定の区間で検査 |
-| [`fp32_exp_recip_rsqrt/`](fp32_exp_recip_rsqrt/) | `exp(x)`、`1/x`、`1/sqrt(x)`の選択出力 | normal結果でRNE参照値から最大1 ULP | 入出力ともFTZ | 各演算の定義域で保持 |
+| [`fp32_exp_recip_rsqrt/`](fp32_exp_recip_rsqrt/) | `exp(x)`、`1/x`、`1/sqrt(x)`の選択出力 | 有限非zero結果でRNE参照値から最大1 step | 合成時に入出力対応／FTZを選択。既定はFTZ | 各演算の定義域で保持 |
 | [`fp16_bf16_exp_recip_rsqrt/`](fp16_bf16_exp_recip_rsqrt/) | FP16／BF16の`exp(x)`、`1/x`、`1/sqrt(x)`の選択出力 | 有限非zero結果でRNE参照値から最大1 step | 入出力とも対応。合成時パラメータでFTZも選択可能 | 各演算の定義域で保持 |
 
 faithfulは、無限精度の値を挟む二つのbinary32値のどちらかを返すことを意味します。
 単調非減少では入力を増やしたときに出力が減らず、単調非増加では出力が増えません。
 丸めによって異なる入力が同じ出力になる場合があるため、等しい場合も許します。
 
-FP16／BF16版の最大1 stepは、対象形式へ正しく丸めた参照値との表現可能な値の間隔であり、faithfulの保証ではありません。
+三機能版の最大1 stepは、対象形式へ正しく丸めた参照値との表現可能な値の間隔であり、faithfulの保証ではありません。
 
 FP32の各演算ディレクトリは、直下に合成対象のRTL、`test/`に検証コード、
 `tools/`に実装固有の生成スクリプトを持ちます。FP16／BF16版は`rtl/`にRTL、
@@ -45,7 +45,7 @@ FP32の各演算ディレクトリは、直下に合成対象のRTL、`test/`に
 | [`FP32Recip`](fp32_recip/README.md#合成時パラメータ) | なし | FP32の逆数、入出力FTZで固定 |
 | [`FP32Rsqrt`](fp32_rsqrt/README.md#合成時パラメータ) | なし | FP32の逆平方根、入力FTZで固定 |
 | [`FP32Elementary`](fp32_elementary/README.md#合成時パラメータ) | 六つの`ENABLE_*` | exp2、recip、rsqrt、sqrt、log2を個別に、sinpi／cospiを一括で有効・無効化。既定は全機能有効 |
-| [`FP32ExpRecipRsqrt`](fp32_exp_recip_rsqrt/README.md#合成時パラメータ) | なし | FP32のexp／recip／rsqrtをすべて搭載、入出力FTZで固定 |
+| [`FP32ExpRecipRsqrt`](fp32_exp_recip_rsqrt/README.md#合成時パラメータ) | `SUPPORT_SUBNORMAL` | 入出力subnormal対応／FTZを選択。既定はFTZ。exp／recip／rsqrtはすべて搭載 |
 | [`FP16BF16ExpRecipRsqrtStudy`](fp16_bf16_exp_recip_rsqrt/README.md#合成時パラメータ) | `FORMAT_MODE`、`SUPPORT_SUBNORMAL` | 形式の実行時切替／FP16専用／BF16専用と、入出力subnormal対応／FTZを選択。既定は形式の実行時切替・subnormal対応 |
 
 機能の有効・無効を指定できるのは`FP32Elementary`だけです。FP32三機能版とFP16／BF16三機能版には
@@ -99,6 +99,8 @@ make exhaustive-active-fp32_exp_recip_rsqrt
 make exhaustive-fp32_exp_recip_rsqrt
 make monotonic-fp32_exp_recip_rsqrt
 make constants-check-fp32_exp_recip_rsqrt
+make test-configs-fp32_exp_recip_rsqrt
+make test-fp32_exp_recip_rsqrt SUPPORT_SUBNORMAL=1
 make lint-fp16_bf16_exp_recip_rsqrt
 make test-fp16_bf16_exp_recip_rsqrt
 make exhaustive-fp16_bf16_exp_recip_rsqrt

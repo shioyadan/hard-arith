@@ -4,7 +4,9 @@
 
 // FP32Elementary相当の数値幅を使う三機能共有組合せ回路。
 // 三機能の区分二次式を一つのHorner datapathで評価する。
-module FP32ExpRecipRsqrt(
+module FP32ExpRecipRsqrt #(
+    parameter bit SUPPORT_SUBNORMAL = 1'b0
+) (
     input  wire [31:0] x,
     input  wire [2:0]  op,
     output wire [31:0] result
@@ -377,7 +379,32 @@ module FP32ExpRecipRsqrt(
     wire x_fraction_zero = x_fraction == 0;
     wire x_is_nan = x_exponent_all_one & ~x_fraction_zero;
     wire x_is_inf = x_exponent_all_one & x_fraction_zero;
-    wire exponent_parity = ~x_exponent[0];
+    wire input_subnormal = SUPPORT_SUBNORMAL & x_exponent_zero & ~x_fraction_zero;
+    wire input_zero = x_exponent_zero & (~SUPPORT_SUBNORMAL | x_fraction_zero);
+
+    // 根系の非zero subnormalだけを、既存の24-bit仮数格子へ正規化する。
+    // 各段の検出とshiftを共有し、shift量は16/8/4/2/1の連結で得る。
+    wire normalize_16 = ~|x_fraction[22:8];
+    wire [23:0] normalized_16 = normalize_16
+        ? {x_fraction[7:0], 16'd0} : {1'b0, x_fraction};
+    wire normalize_8 = ~|normalized_16[23:16];
+    wire [23:0] normalized_8 = normalize_8
+        ? {normalized_16[15:0], 8'd0} : normalized_16;
+    wire normalize_4 = ~|normalized_8[23:20];
+    wire [23:0] normalized_4 = normalize_4
+        ? {normalized_8[19:0], 4'd0} : normalized_8;
+    wire normalize_2 = ~|normalized_4[23:22];
+    wire [23:0] normalized_2 = normalize_2
+        ? {normalized_4[21:0], 2'd0} : normalized_4;
+    wire normalize_1 = ~normalized_2[23];
+    wire [22:0] normalized_fraction = normalize_1
+        ? {normalized_2[21:0], 1'b0} : normalized_2[22:0];
+    wire [4:0] normalization_shift = {
+        normalize_16, normalize_8, normalize_4, normalize_2, normalize_1
+    };
+    wire [22:0] root_fraction = input_subnormal ? normalized_fraction : x_fraction;
+    wire root_fraction_zero = root_fraction == 0;
+    wire exponent_parity = input_subnormal ? normalization_shift[0] : ~x_exponent[0];
 
     // FP32Expと同じ縮小した定数乗算とmodulo残差を使う。
     wire exp_input_in_range = x_exponent >= 8'd102 & x_exponent < 8'd134;
@@ -413,9 +440,9 @@ module FP32ExpRecipRsqrt(
     wire signed [17:0] exp_delta_q24 = exp_r_biased_q28[21:4];
 
     // FP32Elementaryを基準に、Q27/Q18/Q9の二次Hornerへ三機能を揃える。
-    wire [6:0] mantissa_index_m7 = x_fraction[22:16];
+    wire [6:0] mantissa_index_m7 = root_fraction[22:16];
     wire signed [16:0] mantissa_delta_m7_q23 =
-        $signed({1'b0, x_fraction[15:0]})-17'sd32768;
+        $signed({1'b0, root_fraction[15:0]})-17'sd32768;
     wire signed [17:0] polynomial_delta_q24 = select_exp
         ? exp_delta_q24
         : $signed({mantissa_delta_m7_q23, 1'b0});
@@ -513,39 +540,74 @@ module FP32ExpRecipRsqrt(
     wire [24:0] exp_mant = polynomial_mant_q24;
 
     // 厳密点だけ最終fractionをzeroとし、指数を1段補正する。
-    wire root_exact = (select_recip & x_fraction_zero)
-        | (select_rsqrt & x_fraction_zero & ~exponent_parity);
+    wire root_exact = (select_recip & root_fraction_zero)
+        | (select_rsqrt & root_fraction_zero & ~exponent_parity);
     wire [22:0] root_result_fraction = root_exact ? 23'd0 : polynomial_mant_q24[22:0];
     // biased指数を直接計算し、仮数経路からのcarry待ちをなくす。
     wire [7:0] root_scale_operand = select_recip
         ? x_exponent : {1'b0, x_exponent[7:1]};
     wire [7:0] root_scale_base = select_recip ? 8'd253 : 8'd189;
-    wire [7:0] root_result_biased_exponent = root_scale_base-root_scale_operand
+    wire [7:0] root_normal_exponent = root_scale_base-root_scale_operand
         + {7'b0, root_exact} + {7'b0, (select_rsqrt & exponent_parity)};
+    // recipの有限subnormal入力はshift=1/2だけ。overflowは下で先に選択する。
+    // rsqrtは189+ceil(shift/2)+exactとなり、いずれも8 bitで出力指数を表せる。
+    wire [7:0] root_subnormal_exponent = (select_recip ? 8'd252 : 8'd189)
+        + (select_recip ? {3'd0, normalization_shift} : {4'd0, normalization_shift[4:1]})
+        + {7'b0, root_exact} + {7'b0, (select_rsqrt & normalization_shift[0])};
+    wire [7:0] root_result_biased_exponent = input_subnormal
+        ? root_subnormal_exponent : root_normal_exponent;
     wire root_underflows = select_recip
         & ((x_exponent == 8'd254) | ((x_exponent == 8'd253) & ~root_exact));
+    // recipの出力subnormalはQ24仮数から追加1/2 bitのRNEだけで得られる。
+    // 既存の丸めを再利用するため二重丸めになるが、最大1 stepの契約で全仮数を検査する。
+    wire [24:0] reciprocal_mantissa = root_exact ? 25'h1000000 : polynomial_mant_q24;
+    wire reciprocal_shift_two = x_exponent == 8'd254;
+    wire [23:0] reciprocal_subnormal_truncated = reciprocal_shift_two
+        ? {1'b0, reciprocal_mantissa[24:2]} : reciprocal_mantissa[24:1];
+    wire reciprocal_subnormal_round = reciprocal_shift_two
+        ? (reciprocal_mantissa[1] & (reciprocal_mantissa[0] | reciprocal_mantissa[2]))
+        : (reciprocal_mantissa[0] & reciprocal_mantissa[1]);
+    wire [23:0] reciprocal_subnormal = reciprocal_subnormal_truncated
+        + {23'd0, reciprocal_subnormal_round};
     wire [31:0] root_packed_finite = root_underflows
-        ? {(select_recip ? x_sign : 1'b0), 31'd0}
+        ? {x_sign, 7'd0, (SUPPORT_SUBNORMAL ? reciprocal_subnormal : 24'd0)}
         : {(select_recip ? x_sign : 1'b0),
            root_result_biased_exponent, root_result_fraction};
 
+    wire reciprocal_overflows = input_subnormal & (x_fraction <= 23'h200000);
     wire [31:0] reciprocal_result = x_is_inf ? {x_sign, 31'd0}
-        : x_exponent_zero ? {x_sign, 8'hff, 23'd0} : root_packed_finite;
-    wire [31:0] rsqrt_result = x_exponent_zero
+        : (input_zero | reciprocal_overflows) ? {x_sign, 8'hff, 23'd0} : root_packed_finite;
+    wire [31:0] rsqrt_result = input_zero
         ? {x_sign, 8'hff, 23'd0}
         : x_is_inf ? (x_sign ? QNAN : ZERO)
         : x_sign ? QNAN : root_packed_finite;
 
-    // exp側は共通近似結果を正規化し、subnormal出力をzeroへflushする。
+    // expの通常経路は維持する。subnormalだけQ24からshiftし、最後にRNEする。
     wire signed [8:0] exp_result_exponent = exp_mant[24]
         ? exp_q : exp_q-9'sd1;
     wire [22:0] exp_normal_mantissa = exp_mant[24]
         ? exp_mant[23:1] : exp_mant[22:0];
     wire exp_result_is_normal = exp_result_exponent >= -9'sd126;
     wire [7:0] exp_biased_exponent = exp_result_exponent[7:0]+8'd127;
+    // q<-150では必ずzeroへ丸まる。5-bit shift量のwrapより先に飽和させる。
+    wire exp_subnormal_zero = exp_q < -9'sd150;
+    wire [4:0] exp_subnormal_shift = exp_subnormal_zero ? 5'd25 : (5'd3-exp_q[4:0]);
+    // 最下位bitをstickyとして右shiftする。元のQ24値はguardの上へ配置する。
+    wire [26:0] exp_grs_1 = exp_subnormal_shift[0]
+        ? {1'b0, exp_mant, 1'b0} : {exp_mant, 2'b0};
+    wire [26:0] exp_grs_2 = exp_subnormal_shift[1]
+        ? {2'b0, exp_grs_1[26:3], (|exp_grs_1[2:0])} : exp_grs_1;
+    wire [26:0] exp_grs_4 = exp_subnormal_shift[2]
+        ? {4'b0, exp_grs_2[26:5], (|exp_grs_2[4:0])} : exp_grs_2;
+    wire [26:0] exp_grs_8 = exp_subnormal_shift[3]
+        ? {8'b0, exp_grs_4[26:9], (|exp_grs_4[8:0])} : exp_grs_4;
+    wire [26:0] exp_grs = exp_subnormal_shift[4]
+        ? {16'b0, exp_grs_8[26:17], (|exp_grs_8[16:0])} : exp_grs_8;
+    wire [23:0] exp_subnormal_mantissa = exp_grs[25:2]
+        + {23'd0, (exp_grs[1] & (exp_grs[0] | exp_grs[2]))};
     wire [30:0] exp_finite_payload = exp_result_is_normal
         ? {exp_biased_exponent, exp_normal_mantissa}
-        : 31'b0;
+        : (SUPPORT_SUBNORMAL & ~exp_subnormal_zero) ? {7'd0, exp_subnormal_mantissa} : 31'b0;
     wire exp_result_is_inf = exp_result_exponent > 9'sd127;
     wire [31:0] exp_in_range_result = exp_result_is_inf
         ? INF : {1'b0, exp_finite_payload};

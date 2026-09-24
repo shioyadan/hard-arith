@@ -247,6 +247,28 @@ def validate_shared_datapath(exp_rows, elementary_text: str) -> None:
             )
             if not np.array_equal(packed_mantissa, expected_mantissa):
                 raise SystemExit(f"{name} row {index}で加算と最終丸めの統合結果が変わります")
+            # 既存Q24仮数からのsubnormal pack。係数biasは変更しない。
+            if name == "exp":
+                # 26 bit以上の右shiftでは必ずzeroへRNEされる。
+                if np.any(packed_mantissa >= (1 << 25)):
+                    raise SystemExit(f"exp row {index}でunderflow飽和条件を外れます")
+                below_one = packed_mantissa[packed_mantissa < (1 << 24)]
+                rounded = (below_one >> 1)+((below_one & 3) == 3)
+                if np.any(rounded > (1 << 23)):
+                    raise SystemExit(f"exp row {index}でsubnormalが最小normalを超えます")
+            elif name == "reciprocal":
+                # 厳密点は近似を使わず1.0へ戻す。追加1/2 bitのRNEを検査する。
+                mantissa = packed_mantissa.copy()
+                if index == 0:
+                    mantissa[0] = 1 << 24
+                for shift in (1, 2):
+                    high = mantissa >> shift
+                    low = mantissa & ((1 << shift)-1)
+                    half = 1 << (shift-1)
+                    rounded = high+((low > half) | ((low == half) & ((high & 1) != 0)))
+                    require_range(f"recip subnormal row {index}", rounded, 24, signed=False)
+                    if np.any(rounded <= 0) or np.any(rounded > (1 << (24-shift))):
+                        raise SystemExit(f"recip row {index}でsubnormal pack値域を外れます")
 
 
 def generate_coefficient_block() -> str:

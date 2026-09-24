@@ -10,9 +10,10 @@ module FP32ExpRecipRsqrtTB;
     parameter integer MONOTONIC_SAMPLES = 200000;
     parameter integer MAX_ALLOWED_ULP = 1;
     parameter bit CHECK_FAITHFUL = 1'b0;
-    parameter bit REFERENCE_SUBNORMAL = 1'b0;
+    parameter bit SUPPORT_SUBNORMAL = 1'b0;
+    localparam bit REFERENCE_SUBNORMAL = SUPPORT_SUBNORMAL;
     localparam integer FUNCTION_COUNT = 3;
-    localparam integer DIRECTED_COUNT = 24;
+    localparam integer DIRECTED_COUNT = 36;
 
     logic [31:0] x;
     logic [2:0] op;
@@ -58,7 +59,7 @@ module FP32ExpRecipRsqrtTB;
         input int unsigned count
     );
 
-    `DUT_MODULE dut(.x(x), .op(op), .result(result));
+    `DUT_MODULE #(.SUPPORT_SUBNORMAL(SUPPORT_SUBNORMAL)) dut(.x(x), .op(op), .result(result));
 
     function automatic logic is_nan(input logic [31:0] value);
         is_nan = value[30:23] == 8'hff && value[22:0] != 0;
@@ -97,7 +98,19 @@ module FP32ExpRecipRsqrtTB;
             20: directed_input = 32'h7f800000;
             21: directed_input = 32'hff800000;
             22: directed_input = 32'h7fc00001;
-            default: directed_input = 32'hffc00001;
+            23: directed_input = 32'hffc00001;
+            24: directed_input = 32'h80000001;
+            25: directed_input = 32'h807fffff;
+            26: directed_input = 32'h001fffff;
+            27: directed_input = 32'h00200000;
+            28: directed_input = 32'h00200001;
+            29: directed_input = 32'h00400000;
+            30: directed_input = 32'h7e800001;
+            31: directed_input = 32'h7f000000;
+            32: directed_input = 32'hc2aeac50;
+            33: directed_input = 32'hc2aeac51;
+            34: directed_input = 32'hc2cff1b5;
+            default: directed_input = 32'hc2cff1b6;
         endcase
     endfunction
 
@@ -131,6 +144,8 @@ module FP32ExpRecipRsqrtTB;
                            op, x, result, expected);
                 exact_count[index] = exact_count[index]+1;
             end else begin
+                if ((expected[30:0] == 0 || result[30:0] == 0) && result != expected)
+                    $fatal(1, "zero分類不一致: op=%h x=%h actual=%h expected=%h", op, x, result, expected);
                 if (is_nan(result) || is_inf(result))
                     $fatal(1, "有限値分類不一致: op=%h x=%h actual=%h expected=%h",
                            op, x, result, expected);

@@ -50,12 +50,11 @@ uint32_t fp32_exp_recip_rsqrt_ref(uint32_t input, uint32_t op)
     case UINT32_C(0x2):
         if (exponent == UINT32_C(0x7f800000))
             return sign;
-        if (exponent == 0)
+        if (exponent == 0 && fraction == 0)
             return sign | UINT32_C(0x7f800000);
-        return flush_subnormal_output(
-            float_to_bits((float)(1.0F128/(_Float128)x)));
+        return float_to_bits((float)(1.0F128/(_Float128)x));
     case UINT32_C(0x4):
-        if (exponent == 0)
+        if (exponent == 0 && fraction == 0)
             return sign | UINT32_C(0x7f800000);
         if (sign != 0)
             return UINT32_C(0x7fc00000);
@@ -69,8 +68,10 @@ uint32_t fp32_exp_recip_rsqrt_ref(uint32_t input, uint32_t op)
 
 uint32_t fp32_exp_recip_rsqrt_ref_ftz(uint32_t input, uint32_t op)
 {
-    const uint32_t result = fp32_exp_recip_rsqrt_ref(input, op);
-    return op == UINT32_C(0x1) ? flush_subnormal_output(result) : result;
+    /* OFF側は入力をsigned zeroへしてから計算し、出力もflushする。 */
+    const uint32_t normalized_input = (input & UINT32_C(0x7f800000)) == 0
+        ? input & UINT32_C(0x80000000) : input;
+    return flush_subnormal_output(fp32_exp_recip_rsqrt_ref(normalized_input, op));
 }
 
 /* binary128参照値を挟む二つのbinary32値を{upper, lower}で返す。 */
@@ -96,14 +97,14 @@ uint64_t fp32_exp_recip_rsqrt_faithful_bounds(uint32_t input, uint32_t op)
         value = expf128((_Float128)x);
         break;
     case UINT32_C(0x2):
-        if (exponent == 0) {
+        if (exponent == 0 && fraction == 0) {
             lower = upper = sign | UINT32_C(0x7f800000);
             return ((uint64_t)upper << 32) | lower;
         }
         value = 1.0F128/(_Float128)x;
         break;
     case UINT32_C(0x4):
-        if (exponent == 0 || sign != 0) {
+        if ((exponent == 0 && fraction == 0) || sign != 0) {
             lower = upper = fp32_exp_recip_rsqrt_ref(input, op);
             return ((uint64_t)upper << 32) | lower;
         }
