@@ -544,9 +544,9 @@ module FP32Elementary #(
         27'd72774302, 27'd75028298, 27'd77306841, 27'd79610193, // 40 .. 43
         27'd81938624, 27'd84292415, 27'd86671838, 27'd89077158, // 44 .. 47
         27'd91508682, 27'd93966686, 27'd96451454, 27'd98963268, // 48 .. 51
-        27'd101502448, 27'd104069276, 27'd106664044, 27'd109287080, // 52 .. 55
+        27'd101502448, 27'd104069276, 27'd106664044, 27'd109287082, // 52 .. 55
         27'd111938664, 27'd114619138, 27'd117328790, 27'd120067956, // 56 .. 59
-        27'd122836938, 27'd125636090, 27'd128465706, 27'd131326152 // 60 .. 63
+        27'd122836940, 27'd125636090, 27'd128465706, 27'd131326152 // 60 .. 63
     };
 
     localparam [1:0] exp2_c1_q17_prefix = 2'b00;
@@ -729,12 +729,14 @@ module FP32Elementary #(
     wire sine_result_sign = selected_phase[23]^(x_sign&select_sinpi);
 
     // funcごとの係数bankと差分を選び、二つの乗算だけでHorner評価する。
-    wire signed [18:0] polynomial_delta_q24 = select_recip | select_rsqrt
-        ? {{1{mantissa_delta_m7_q23[16]}}, mantissa_delta_m7_q23, 1'b0}
-        : select_sqrt | select_log2 ? {mantissa_delta_m6_q23, 1'b0}
-        : select_exp2 ? exp2_delta_q24
-        : ENABLE_SINCOS ? {sine_delta_q23[16], sine_delta_q23, 1'b0}
-        : 19'sd0;
+    // Q24の精度は維持し、exp2の正端点だけsigned 18-bit最大値へ制限する。
+    wire signed [17:0] exp2_delta_clamped_q24 = exp2_delta_q24[18:17] == 2'b01
+        ? 18'sd131071 : exp2_delta_q24[17:0];
+    wire signed [17:0] polynomial_delta_q24 = select_recip | select_rsqrt
+        ? {mantissa_delta_m7_q23, 1'b0}
+        : select_sqrt | select_log2 ? {mantissa_delta_m6_q23[16:0], 1'b0}
+        : select_exp2 ? exp2_delta_clamped_q24
+        : ENABLE_SINCOS ? {sine_delta_q23, 1'b0} : 18'sd0;
 
     // 各bankで共通する上位bitはtableに置かず、読み出し時に再連結する。
     wire signed [28:0] reciprocal_c0_q27_value = $signed({
@@ -852,31 +854,18 @@ module FP32Elementary #(
         : select_exp2 ? exp2_c2_q9_value
         : ENABLE_SINCOS ? sine_c2_q9_value : 13'sd0;
 
-    wire signed [31:0] inner_product_q33 =
-        polynomial_delta_q24*coefficient_c2_q9;
-    wire signed [32:0] inner_product_biased_q33 =
-        $signed({inner_product_q33[31], inner_product_q33})
-        + 33'sd16384;
-    // 全関数をQ18に揃え、根系の内側丸めの段差も小さくする。
-    wire signed [14:0] inner_correction_q18 =
-        inner_product_biased_q33[29:15];
-    wire signed [20:0] coefficient_c1_q18 =
-        $signed({coefficient_c1_q17, 1'b0});
-    wire signed [20:0] inner_q18 = coefficient_c1_q18
-        + {{6{inner_correction_q18[14]}}, inner_correction_q18};
-    wire signed [39:0] outer_product_q42 = polynomial_delta_q24*inner_q18;
-    wire signed [40:0] outer_product_biased_q42 =
-        $signed({outer_product_q42[39], outer_product_q42})
-        + (select_exp2 ? 41'sd16384 : 41'sd65536);
-    wire signed [21:0] outer_correction_exp_q27 =
-        outer_product_biased_q42[36:15];
-    wire signed [20:0] outer_correction_reduced_q25 =
-        outer_product_biased_q42[37:17];
-    wire signed [22:0] outer_correction_q27 = select_exp2
-        ? {outer_correction_exp_q27[21], outer_correction_exp_q27}
-        : $signed({outer_correction_reduced_q25, 2'b0});
-    wire signed [28:0] polynomial_q27 = coefficient_c0_q27
-        + {{6{outer_correction_q27[22]}}, outer_correction_q27};
+    // C1をQ33へ揃えて加え、従来と同じ位置でQ18へ丸める。
+    wire signed [35:0] inner_accumulator_q33 =
+        $signed({coefficient_c1_q17, 16'b0})
+        + polynomial_delta_q24*coefficient_c2_q9 + 36'sd16384;
+    wire signed [20:0] inner_q18 = inner_accumulator_q33[35:15];
+    // 非exp2のC0はQ27整数で4の倍数。Q25丸め後も同じ値になる。
+    wire signed [43:0] outer_accumulator_q42 =
+        $signed({coefficient_c0_q27, 15'b0})
+        + polynomial_delta_q24*inner_q18
+        + (select_exp2 ? 44'sd16384 : 44'sd65536);
+    wire signed [28:0] polynomial_q27 = select_exp2
+        ? outer_accumulator_q42[43:15] : {outer_accumulator_q42[43:17], 2'b0};
 
     // 数学的に厳密な格子点は近似をbypassする。
     wire reciprocal_exact = x_fraction_zero;

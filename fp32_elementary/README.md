@@ -27,8 +27,10 @@ fp32_elementary/
 │   ├── tb_function_enables.sv
 │   ├── tb_fp32_elementary.sv
 │   └── test_constants.py
-└── tools/
-    └── gen_constants.py
+├── tools/
+│   └── gen_constants.py
+└── experiments/
+    └── kernel_opt/
 ```
 
 `fp32_elementary.sv`だけが合成対象です。`test/`は関数ごとの数値精度、単調性、
@@ -189,7 +191,7 @@ make test-fp32_elementary RANDOM_CYCLES=1000000 MONOTONIC_SAMPLES=1000000
 検査した後、exp2の全`2^32` bit patternを列挙します。途中で違反を検出しても
 全走査を完了し、最後に失敗を返します。網羅範囲と参照値の作り方は次節に示します。
 
-2026-09-17の再検証では、各関数の精度違反・隣接単調性違反とも0で、縮約検査と
+2026-09-18の18-bit残差・両段加算統合後の再検証では、各関数の精度違反・隣接単調性違反とも0で、縮約検査と
 exp2全入力検査の両方が`pass=1`です。sinpi/cospiの単調性も合否に含めています。
 
 短い確認には`make exhaustive-reduced`、exp2の近似本体だけの確認には
@@ -286,7 +288,10 @@ x = (-1)^s*M*2^E,  1 <= M < 2
 | `sin(pi*x)` | 周期2の位相を`[0, 0.5]`へ折り返し、64区間の右端との差を使う | 64行 |
 | `cos(pi*x)` | 位相へ0.5を加え、sinと同じ引数還元とtableを使う | sinと共有 |
 
-`2^x`では`|d| <= 1/128`、sin/cosでは折り返し後の各区間で
+`2^x`では還元直後に`|d| <= 1/128`です。Q24のままsigned 18 bitへ収めるため、
+整数表現の正端点131,072だけを131,071へ制限します。小数部の精度を1 bit落とすのではなく、
+正端点でのみ`2^-24`の差を許し、係数生成ではその端点の量子化cellも含めて誤差を調整します。
+sin/cosでは折り返し後の各区間で
 `-1/128 <= d < 0`です。他の関数は区間中央を基準にします。
 sqrtと逆平方根は、指数の偶奇をtable addressの上位bitへ加え、
 後で`2^E`由来のscaleを出力指数へ移します。
@@ -296,15 +301,22 @@ sqrtと逆平方根は、指数の偶奇をtable addressの上位bitへ加え、
 関数と区間から選んだ一組の係数を、次の順に評価します。
 
 ```text
-inner = C1+round(d*C2)
-value = C0+round(d*inner)
+inner = round_Q18(C1+d*C2)
+value = round_Q27(C0+d*inner)  // exp2
+value = round_Q25(C0+d*inner)  // その他。最後にQ27へ揃える
 ```
 
-`d^2`を別途生成せずHorner形で計算するため、可変乗算は19 x 13 bitと
-19 x 21 bitの二回です。係数は関数ごとに必要な精度だけを格納し、左shiftで
+`d^2`を別途生成せずHorner形で計算するため、可変乗算は18 x 13 bitと
+18 x 21 bitの二回です。係数は関数ごとに必要な精度だけを格納し、左shiftで
 共通のQ27/Q17/Q9へ揃えてから共有datapathへ渡します。reciprocal、sqrt、rsqrtは
 Q25/Q17/Q8、`log2`はQ25/Q16/Q7、`2^x`はQ27/Q17/Q9、sin/cosは
 Q24/Q15/Q5の`C0/C1/C2`を使います。Horner中間値は全関数でQ18に保ちます。
+
+各段では係数・積・丸めbiasを同じ小数点へ揃え、一つの積和式にまとめてから
+必要なbitを切り出します。内側は36-bit Q33、外側は44-bit Q42で保持します。
+途中丸めは半LSBの加算と算術右shiftで、tieは正方向です。これは最後のpackerのRNEとは別です。
+`C1`はQ18格子、非exp2の`C0`はQ25格子に厳密に載るため、係数を丸め前に加えても
+従来の`C+round(積)`と同じ結果です。二段の途中丸めを一回に減らす変更ではありません。
 
 内側の積を粗く丸めると、連続多項式が単調でも段差による逆行が起こり得ます。
 sqrt／rsqrtでは、既に`2^x`で使うQ18精度を共有し、全残差で最終出力の単調性を
@@ -329,7 +341,8 @@ Horner演算と中間丸めを含む最大誤差が小さくなるように調�
 
 `2^x`ではさらに、Q24残差の各量子化cellに対応する実引数区間を調べ、共通packerの
 出力が区間全体でRNE参照値から1 ULP以内になるQ27の`C0`範囲を逆算します。その範囲内で
-各区間内とtable境界の出力が単調になる`C0`列を選びます。
+各区間内とtable境界の出力が単調になる`C0`列を選びます。まず対称なQ24格子で選別し、
+次に正端点の制限を含めて、必要な行だけを最小変更量で再調整します。
 
 sqrt／rsqrtも、Q18中間丸めと最終packerを含む全残差で精度・単調性を確認し、
 隣接行が逆行しない`C0`列を動的計画法で選びます。sin/cosは右端基準へ係数を
@@ -348,13 +361,13 @@ RTLのtableへ実際に格納するsuffixは33,600 bitです。
 
 | 信号・係数 | 幅 | 形式 | 役割 |
 |---|---:|---|---|
-| `polynomial_delta_q24` | 19 | signed Q24 | 区間の基準点からの差`d` |
+| `polynomial_delta_q24` | 18 | signed Q24 | 区間の基準点からの差`d` |
 | `coefficient_c0_q27` | 29 | signed Q27 | 共通形式へ揃えた定数項 |
 | `coefficient_c1_q17` | 20 | signed Q17 | 一次係数 |
 | `coefficient_c2_q9` | 13 | signed Q9 | 共通形式へ揃えた二次係数 |
-| `inner_product_q33` | 32 | signed Q33 | `d*C2` |
+| `inner_accumulator_q33` | 36 | signed Q33 | `C1+d*C2`と丸めbias |
 | `inner_q18` | 21 | signed Q18 | `C1+round(d*C2)` |
-| `outer_product_q42` | 40 | signed Q42 | `d*inner` |
+| `outer_accumulator_q42` | 44 | signed Q42 | `C0+d*inner`と丸めbias |
 | `polynomial_q27` | 29 | signed Q27 | 二次近似結果 |
 | `value_q27` | 36 | signed Q27 | `log2`の整数部を含むpacker入力 |
 
@@ -387,6 +400,10 @@ make constants
 係数tableはSystemVerilogのunpacked定数配列で記述しています。合成器がこの構文を
 直接扱えない場合は、同じ値を`case`で表すROMへ機械的に変換する必要があります。
 変換時は全table値と入出力がビット単位で一致することを確認してください。
+
+幅削減・積和統合の比較用生成器は[`experiments/kernel_opt/`](experiments/kernel_opt/README.md)に
+分離しています。その`delta18-both`構成を公開トップへ採用していますが、通常の合成・定数生成・
+test targetは実験directoryに依存しません。
 
 ## ライセンス
 

@@ -10,7 +10,8 @@ import unittest
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-from gen_constants import choose_monotonic_path, round_signed_shift_array, tune_row
+from gen_constants import (choose_monotonic_path, round_signed_shift_array,
+                           tune_row, validate_datapath_ranges)
 
 
 class MonotonicConstantsTest(unittest.TestCase):
@@ -45,6 +46,21 @@ class MonotonicConstantsTest(unittest.TestCase):
     def test_signed_rounding_ties_toward_positive(self):
         result = round_signed_shift_array(np.array([-7, -6, -5, 5, 6, 7]), 2)
         np.testing.assert_array_equal(result, [-2, -1, -1, 1, 2, 2])
+
+    def test_fused_datapath_signed_ranges(self):
+        # 正負の係数と残差を使い、統合前後の丸め一致・宣言幅を全格子で検査する。
+        validate_datapath_ranges('reciprocal', [(1 << 24, -131072, 256, 0)],
+                                 1 << 15, 25, 8)
+        validate_datapath_ranges('sine', [(16777215, 0, -158, 0)],
+                                 1 << 15, 24, 5, c1_fraction_bits=15)
+        validate_datapath_ranges('exp2', [(243504810, 168788, 437, 0)],
+                                 1 << 17, 27, 9, delta_fraction_bits=24,
+                                 include_upper_endpoint=True)
+
+    def test_fused_datapath_rejects_nonrepresentable_residual(self):
+        with self.assertRaises(SystemExit):
+            validate_datapath_ranges('reciprocal', [(1 << 24, 0, 0, 0)],
+                                     (1 << 16)+1, 25, 8)
 
     def test_sine_extremum_preserves_prefix_and_monotonicity(self):
         c0, c1, c2, _ = tune_row(

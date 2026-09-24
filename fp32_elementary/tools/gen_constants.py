@@ -279,9 +279,20 @@ def make_exp2_rows():
         C1_FRACTION_BITS,
         C2_FRACTION_BITS,
     )
+    rows_q27 = [(c0 << 1, c1, c2, error) for c0, c1, c2, error in rows]
+    # まず対称なQ24格子でC0を決定し、端点clampに必要な変更だけを加える。
+    # これにより、幅削減と無関係な行の最終丸めを変えない。
+    return tune_exp2_c0(tune_exp2_c0(rows_q27, clamp=False), clamp=True)
+
+
+def tune_exp2_c0(rows, clamp: bool):
+    """Q27の基準C0列から、精度・単調性を満たす変更量最小の列を選ぶ。"""
     domains = []
     for index, (c0, c1, c2, error) in enumerate(rows):
         delta, lower, upper = exp2_polynomial_bounds(index)
+        # cellの真値区間は変えず、RTLへ渡す正端点だけsigned 18-bitへ収める。
+        if clamp:
+            delta = np.minimum(delta, (1 << 17)-1)
         c1_q18 = c1 << 1
         inner = c1_q18+round_signed_shift_array(
             delta*c2,
@@ -296,7 +307,6 @@ def make_exp2_rows():
         highest_c0 = int(np.min(upper-correction))
         if lowest_c0 > highest_c0:
             raise SystemExit(f"exp2 table {index}に1 ULPを満たすC0がありません")
-        scaled_c0 = c0 << (EXP2_C0_FRACTION_BITS-26)
         candidates = []
         for candidate_c0 in range(lowest_c0, highest_c0+1):
             output = pack_exp2_reduced_q27(candidate_c0+correction)
@@ -306,7 +316,7 @@ def make_exp2_rows():
                 candidate_c0,
                 int(output[0]),
                 int(output[-1]),
-                abs(candidate_c0-scaled_c0),
+                abs(candidate_c0-c0),
             ))
         if not candidates:
             raise SystemExit(f"exp2 table {index}に単調なC0がありません")
@@ -402,66 +412,45 @@ def validate_datapath_ranges(
     )
     if name == "sine":
         delta -= half_integer
-    if name == "exp2":
-        limits = {
-            "inner_product": (-(1 << 31), (1 << 31)-1),
-            "inner_correction": (-(1 << 13), (1 << 13)-1),
-            "inner": (-(1 << 20), (1 << 20)-1),
-            "outer_product": (-(1 << 39), (1 << 39)-1),
-            "outer_correction": (-(1 << 21), (1 << 21)-1),
-            "polynomial": (-(1 << 28), (1 << 28)-1),
-        }
-    else:
-        limits = {
-            "inner_product": (-(1 << 31), (1 << 31)-1),
-            "inner_correction": (-(1 << 14), (1 << 14)-1),
-            "inner": (-(1 << 20), (1 << 20)-1),
-            "outer_product": (-(1 << 39), (1 << 39)-1),
-            "outer_correction": (-(1 << 20), (1 << 20)-1),
-            "polynomial": (-(1 << 26), (1 << 26)-1),
-        }
+    limits = {
+        "delta": (-(1 << 17), (1 << 17)-1),
+        "inner_product": (-(1 << 30), (1 << 30)-1),
+        "inner_accumulator": (-(1 << 35), (1 << 35)-1),
+        "inner": (-(1 << 20), (1 << 20)-1),
+        "outer_product": (-(1 << 38), (1 << 38)-1),
+        "outer_accumulator": (-(1 << 43), (1 << 43)-1),
+        "polynomial": (-(1 << 28), (1 << 28)-1),
+    }
     observed = {key: [None, None] for key in limits}
     # 非exp2の入力格子もRTLのQ24へ揃え、実際の積の宣言幅と比較する。
     datapath_delta = delta << (EXP2_DELTA_FRACTION_BITS-delta_fraction_bits)
+    if name == "exp2":
+        datapath_delta = np.minimum(datapath_delta, (1 << 17)-1)
 
     for c0, c1, c2, _ in rows:
         c2_q9 = c2 << (C2_FRACTION_BITS-c2_fraction_bits)
         inner_product = datapath_delta*c2_q9
-        if name == "exp2":
-            c1_value = c1 << 1
-            inner_correction = round_signed_shift_array(
-                inner_product,
-                EXP2_DELTA_FRACTION_BITS+C2_FRACTION_BITS-c1_fraction_bits,
-            )
-            inner = c1_value+inner_correction
-            outer_product = datapath_delta*inner
-            outer_correction = round_signed_shift_array(
-                outer_product,
-                EXP2_DELTA_FRACTION_BITS+c1_fraction_bits-c0_fraction_bits,
-            )
-            polynomial = c0+outer_correction
-        else:
-            c1_value = c1 << (C1_FRACTION_BITS+1-c1_fraction_bits)
-            inner_correction = round_signed_shift_array(
-                inner_product,
-                EXP2_DELTA_FRACTION_BITS+C2_FRACTION_BITS-(C1_FRACTION_BITS+1),
-            )
-            inner = c1_value+inner_correction
-            outer_product = datapath_delta*inner
-            outer_correction = round_signed_shift_array(
-                outer_product,
-                EXP2_DELTA_FRACTION_BITS+(C1_FRACTION_BITS+1)
-                - REDUCED_C0_FRACTION_BITS,
-            )
-            polynomial = (
-                c0 << (REDUCED_C0_FRACTION_BITS-c0_fraction_bits)
-            )+outer_correction
+        c1_q18 = c1 << (C1_FRACTION_BITS+1-c1_fraction_bits)
+        c0_q27 = c0 << (EXP2_C0_FRACTION_BITS-c0_fraction_bits)
+        inner_accumulator = (c1_q18 << 15)+inner_product+(1 << 14)
+        inner = inner_accumulator >> 15
+        separate_inner = c1_q18+round_signed_shift_array(inner_product, 15)
+        outer_product = datapath_delta*inner
+        shift = 15 if name == "exp2" else 17
+        outer_accumulator = (c0_q27 << 15)+outer_product+(1 << (shift-1))
+        polynomial = (outer_accumulator >> shift) << (shift-15)
+        separate_polynomial = c0_q27+(
+            round_signed_shift_array(outer_product, shift) << (shift-15))
+        if (np.any(inner != separate_inner)
+                or np.any(polynomial != separate_polynomial)):
+            raise SystemExit(f"{name}の積和統合で丸め位置が変わっています")
         values = {
+            "delta": datapath_delta,
             "inner_product": inner_product,
-            "inner_correction": inner_correction,
+            "inner_accumulator": inner_accumulator,
             "inner": inner,
             "outer_product": outer_product,
-            "outer_correction": outer_correction,
+            "outer_accumulator": outer_accumulator,
             "polynomial": polynomial,
         }
         for key, value in values.items():
@@ -592,7 +581,7 @@ def generate_block() -> str:
          DELTA_FRACTION_BITS, LOG2_C1_FRACTION_BITS, False),
         ("exp2", exp2, 1 << 17,
          EXP2_C0_FRACTION_BITS, C2_FRACTION_BITS,
-         EXP2_DELTA_FRACTION_BITS, C1_FRACTION_BITS+1, True),
+         EXP2_DELTA_FRACTION_BITS, C1_FRACTION_BITS, True),
         ("sine", sine, 1 << 15,
          SINE_C0_FRACTION_BITS, SINE_C2_FRACTION_BITS,
          DELTA_FRACTION_BITS, SINE_C1_FRACTION_BITS, False),
