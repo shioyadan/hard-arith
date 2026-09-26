@@ -129,6 +129,22 @@ int main(int argc, char** argv) try {
     bench.known_modes(0xff7fffff, 0x3f800000, 0xf3000000,
         {0xff800000, 0xff7fffff, 0xff800000, 0xff7fffff, 0xff800000});
 
+    // 相殺後の2の冪とその両隣。負値の絶対値化と丸めの統合では、
+    // |sum|-1の先頭位置が一つ下がる境界と、捨てる桁のall-oneを検査する。
+    // 積の符号も反転し、全有限指数と仮数内の全bit位置を5モードで通す。
+    for (uint32_t exponent = 0; exponent <= 254; ++exponent) {
+        const uint32_t base = exponent << 23;
+        for (unsigned bit = 0; bit < 23; ++bit) {
+            for (int offset : {-1, 0, 1}) {
+                const uint32_t value = base | uint32_t((1 << bit) + offset);
+                for (uint32_t multiplier : {0x3f800000u, 0x3f800001u}) {
+                    bench.check(value, multiplier, base ^ 0x80000000u);
+                    bench.check(value ^ 0x80000000u, multiplier, base);
+                }
+            }
+        }
+    }
+
     const std::array<uint32_t, 26> values{
         0, 0x80000000, 1, 0x80000001, 0x003fffff, 0x00400000, 0x007fffff, 0x807fffff,
         0x00800000, 0x80800000, 0x00800001, 0x3f000000, 0x3f7fffff, 0x3f800000,

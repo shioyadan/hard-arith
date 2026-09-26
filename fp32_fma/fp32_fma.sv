@@ -9,26 +9,6 @@ module FP32FMA (
     input  wire [2:0] rounding_mode,
     output wire [31:0] result
 );
-    // 桁合わせと最終packの両方で使う。落ちたbitはbit 0へ集約する。
-    function automatic [75:0] shift_right_jam (
-        input [75:0] value,
-        input [9:0] distance
-    );
-        reg [75:0] shifted;
-        reg lost;
-        begin
-            shifted = value;
-            lost = 1'b0;
-            for (integer k = 0; k < 7; k = k + 1) begin
-                if (distance[k]) begin
-                    lost = |(shifted & ((76'd1 << (1 << k)) - 76'd1));
-                    shifted = (shifted >> (1 << k)) | {75'b0, lost};
-                end
-            end
-            shift_right_jam = |distance[9:7] ? {75'b0, |value} : shifted;
-        end
-    endfunction
-
     localparam [2:0] RNE = 3'b000, RTZ = 3'b001, RDN = 3'b010,
                      RUP = 3'b011, RMM = 3'b100;
     wire round_down = rounding_mode == RDN;
@@ -60,8 +40,21 @@ module FP32FMA (
     // Mcをbit 75:52に置き、Ep-Ec+26だけ右shiftすると積と格子が一致する。
     wire signed [9:0] alignment_shift = product_exponent - c_exponent + 10'sd26;
     wire addend_dominates = !c_zero && (alignment_shift < 10'sd0 || a_zero || b_zero);
+    // 加数の右shift。落ちたbitを各段でbit 0へ集約する。
+    reg [75:0] shifted_addend;
+    reg alignment_lost;
+    always_comb begin
+        shifted_addend = {c_significand, 52'b0};
+        alignment_lost = 1'b0;
+        for (integer k = 0; k < 7; k = k + 1) begin
+            if (alignment_shift[k]) begin
+                alignment_lost = |(shifted_addend & ((76'd1 << (1 << k)) - 76'd1));
+                shifted_addend = (shifted_addend >> (1 << k)) | {75'b0, alignment_lost};
+            end
+        end
+    end
     wire [75:0] aligned_addend = alignment_shift < 10'sd0 ? 76'b0 :
-                                shift_right_jam({c_significand, 52'b0}, $unsigned(alignment_shift));
+        |alignment_shift[9:7] ? {75'b0, |c_significand} : shifted_addend;
     // 加数が支配的でも、非zeroの積は方向指定の丸めに影響する。
     // 積と加数が同符号なら絶対値を増やし、逆符号なら減らす隣接値を使う。
     wire adjust_addend = !(a_zero || b_zero) &&
@@ -77,32 +70,57 @@ module FP32FMA (
     wire [47:0] product = a_significand * b_significand;
     wire [76:0] addend_twos = {1'b0, aligned_addend} ^ {77{subtract}};
     wire [76:0] sum = {26'b0, product, 3'b0} + addend_twos + {76'b0, subtract};
-    wire [75:0] magnitude = sum[76] ? -sum[75:0] : sum[75:0];
     wire sum_zero = sum == 77'b0;
     wire sum_sign = sum_zero ? (subtract ? round_down : product_sign) : product_sign ^ sum[76];
 
+    // 負値は|sum|-1のまま先頭位置を探し、二の補数の+1を最終丸めへ送る。
+    wire [75:0] magnitude_minus_one = sum[75:0] ^ {76{sum[76]}};
     reg [6:0] leading_index;
     always_comb begin
         leading_index = 7'b0;
         for (integer i = 0; i < 76; i = i + 1) begin
-            if (magnitude[i]) leading_index = 7'(i);
+            if (magnitude_minus_one[i]) leading_index = 7'(i);
         end
     end
 
+    wire [6:0] leading_zeros = 7'd75 - leading_index;
     wire signed [9:0] normalized_exponent = product_exponent + $signed({3'b0, leading_index}) - 10'sd49;
     wire subnormal = normalized_exponent <= 10'sd0;
-    // 仮数24 bitとGRSをbit 26:0へ置く。極小入力でも指数を8 bitへ縮めない。
-    wire signed [9:0] rounding_shift = subnormal ? 10'sd24 - product_exponent :
-                                                 $signed({3'b0, leading_index}) - 10'sd26;
-    wire [75:0] shifted_magnitude = rounding_shift < 10'sd0 ?
-                                   magnitude << $unsigned(-rounding_shift) :
-                                   shift_right_jam(magnitude, $unsigned(rounding_shift));
-    wire [26:0] grs = shifted_magnitude[26:0];
-    wire inexact = |grs[2:0];
-    wire increment = (rounding_mode == RNE && grs[2] && (grs[3] || grs[1] || grs[0])) ||
-                     (rounding_mode == RMM && grs[2]) ||
-                     (round_down && sum_sign && inexact) ||
-                     (round_up && !sum_sign && inexact);
+    // 仮数24 bitとguard/roundを残す窓を段階ごとに狭める。
+    // 左shiftの上限Ep+25は、subnormalで出力の最下位桁を固定するためのbudget。
+    wire signed [9:0] shift_budget = product_exponent + 10'sd25;
+    wire tiny = shift_budget < 10'sd0;
+    wire [6:0] normalize_shift = tiny ? 7'b0 : subnormal ? shift_budget[6:0] : leading_zeros;
+    // 生の和をzero-fillでshiftし、狭い出力で反転する。
+    // 負値では (|sum| << normalize_shift)-1 となり、強い相殺でも+1を遅延できる。
+    wire [75:0] norm64 = normalize_shift[6] ? {sum[11:0], 64'b0} : sum[75:0];
+    wire [56:0] norm32 = normalize_shift[5] ? {norm64[43:0], 13'b0} : norm64[75:19];
+    wire [40:0] norm16 = normalize_shift[4] ? norm32[40:0] : norm32[56:16];
+    wire [32:0] norm8 = normalize_shift[3] ? norm16[32:0] : norm16[40:8];
+    wire [28:0] norm4 = normalize_shift[2] ? norm8[28:0] : norm8[32:4];
+    wire [26:0] norm2 = normalize_shift[1] ? norm4[26:0] : norm4[28:2];
+    wire [25:0] norm1 = normalize_shift[0] ? norm2[25:0] : norm2[26:1];
+    wire norm_sticky = (!normalize_shift[5] && |norm64[18:0]) ||
+                       (!normalize_shift[4] && |norm32[15:0]) ||
+                       (!normalize_shift[3] && |norm16[7:0]) ||
+                       (!normalize_shift[2] && |norm8[3:0]) ||
+                       (!normalize_shift[1] && |norm4[1:0]) ||
+                       (!normalize_shift[0] && norm2[0]);
+    // Ep<-25で非zeroの加数はbypass済み。残る積は最小subnormalの半分未満。
+    wire [25:0] normalized_word = norm1 ^ {26{sum[76]}};
+    // 負値でのbit 0は反転前のsticky。通常のGRS丸めは正値だけへ適用する。
+    wire [26:0] grs = tiny ? {26'b0, !sum_zero} : {normalized_word, norm_sticky};
+    wire positive_inexact = |grs[2:0];
+    wire round_away = (round_down && sum_sign) || (round_up && !sum_sign);
+    // 負値のguardより下がall-oneかは、反転前の捨てたbitのORだけで分かる。
+    // +1が仮数へ届く場合と、+1後の丸め増分は同時に二度発生しない。
+    wire negative_tail_all_one = grs[1] && !norm_sticky;
+    wire increment = sum[76] ?
+        (rounding_mode == RNE ? grs[2] || (grs[3] && negative_tail_all_one) :
+         rounding_mode == RMM ? grs[2] || negative_tail_all_one :
+         round_away || (grs[2] && negative_tail_all_one)) :
+        ((rounding_mode == RNE && grs[2] && (grs[3] || grs[1] || grs[0])) ||
+         (rounding_mode == RMM && grs[2]) || (round_away && positive_inexact));
     wire [24:0] rounded = {1'b0, grs[26:3]} + {24'b0, increment};
     wire [9:0] result_exponent = subnormal ? {9'b0, rounded[23]} :
                                            $unsigned(normalized_exponent) + {9'b0, rounded[24]};
