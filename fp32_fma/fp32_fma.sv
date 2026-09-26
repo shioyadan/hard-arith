@@ -39,6 +39,9 @@ module FP32FMA (
 
     // Mcをbit 75:52に置き、Ep-Ec+26だけ右shiftすると積と格子が一致する。
     wire signed [9:0] alignment_shift = product_exponent - c_exponent + 10'sd26;
+    // 距離の下位4 bitは上位の指数計算を経由せず、同じ値を先行生成する。
+    wire [3:0] early_shift = a_exponent[3:0] + b_exponent[3:0] + ~c_exponent[3:0] + 4'd12;
+    wire [6:0] alignment_control = {alignment_shift[6:4], early_shift};
     wire addend_dominates = !c_zero && (alignment_shift < 10'sd0 || a_zero || b_zero);
     // 加数の右shift。落ちたbitを各段でbit 0へ集約する。
     reg [75:0] shifted_addend;
@@ -47,7 +50,7 @@ module FP32FMA (
         shifted_addend = {c_significand, 52'b0};
         alignment_lost = 1'b0;
         for (integer k = 0; k < 7; k = k + 1) begin
-            if (alignment_shift[k]) begin
+            if (alignment_control[k]) begin
                 alignment_lost = |(shifted_addend & ((76'd1 << (1 << k)) - 76'd1));
                 shifted_addend = (shifted_addend >> (1 << k)) | {75'b0, alignment_lost};
             end
