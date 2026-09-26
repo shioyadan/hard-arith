@@ -8,7 +8,7 @@
 
 ## 実装済みの演算
 
-各公開トップはclockなしの組合せ回路です。入出力形式はFP32（IEEE 754 binary32）、
+下表の各トップはclockなしの組合せ回路です。入出力形式はFP32（IEEE 754 binary32）、
 またはFP16（binary16）／BF16です。
 
 | ディレクトリ | 演算 | 精度保証 | subnormal | 単調性 |
@@ -31,6 +31,15 @@ FP32の各演算ディレクトリは、直下に合成対象のRTL、`test/`に
 `tools/`に実装固有の生成スクリプトを持ちます。FP16／BF16版は`rtl/`にRTL、
 直下に検証コードと生成スクリプトを置きます。NaN、Inf、符号付きzeroなどの特殊値、
 丸めの適用範囲、アルゴリズムの詳細は各ディレクトリの`README.md`を参照してください。
+
+### 積和演算器の試作
+
+[`fp32_fma/`](fp32_fma/)に、FP32の`a*b+c`を処理する組合せ回路`FP32FMA`を置いています。
+`rounding_mode`入力でRNE・RTZ・RDN・RUP・RMMを選び、最後に一度だけ丸めます。
+入出力subnormal対応です。clock・reset・valid・内部レジスタ・例外フラグはありません。
+独立したMPFR参照とのbit一致を検査します。三入力全数や形式証明は未実施で、
+合成・gate検証の結果は評価リポジトリで管理します。
+合成時パラメータはありません。
 
 ## 合成時パラメータ
 
@@ -56,7 +65,7 @@ FP32の各演算ディレクトリは、直下に合成対象のRTL、`test/`に
 
 ## 検証
 
-全実装のlintとテストはリポジトリ直下から実行できます。
+「実装済みの演算」の表にあるunitのlintとテストはリポジトリ直下から実行できます。
 
 ```sh
 make lint
@@ -64,6 +73,9 @@ make test
 make exhaustive
 make constants-check
 ```
+
+FMA試作はこの一括対象には含めず、`make lint-fp32_fma`、`make test-fp32_fma`、
+`make -C fp32_fma stress`で個別に検証します。依存環境と検査範囲はunit READMEを参照してください。
 
 `FP32Elementary`の機能選択設定の全64組合せは
 `make test-configs-fp32_elementary`で検査します。詳細は[unit README](fp32_elementary/README.md)を参照してください。
