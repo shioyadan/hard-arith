@@ -74,12 +74,13 @@ module FP32FMA (
     wire sum_sign = sum_zero ? (subtract ? round_down : product_sign) : product_sign ^ sum[76];
 
     // 負値は|sum|-1のまま先頭位置を探し、二の補数の+1を最終丸めへ送る。
-    wire [75:0] magnitude_minus_one = sum[75:0] ^ {76{sum[76]}};
+    // 隣接bit間の最上位の遷移は、符号反転後の最上位1と同じ位置になる。
+    wire [75:0] leading_input = sum[75:0] ^ sum[76:1];
     reg [6:0] leading_index;
     always_comb begin
         leading_index = 7'b0;
         for (integer i = 0; i < 76; i = i + 1) begin
-            if (magnitude_minus_one[i]) leading_index = 7'(i);
+            if (leading_input[i]) leading_index = 7'(i);
         end
     end
 
