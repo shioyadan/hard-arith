@@ -72,24 +72,50 @@ module FP32FMA (
     // 24×24の積は48 bit。符号反転とcarry-inも同じ積和へ接続する。
     wire [47:0] product = a_significand * b_significand;
     wire [76:0] addend_twos = {1'b0, aligned_addend} ^ {77{subtract}};
-    wire [76:0] sum = {26'b0, product, 3'b0} + addend_twos + {76'b0, subtract};
+    // 積はbit 50以下。下位積和と並列に上位+1の伝播条件を作る。
+    wire [51:0] lower_sum = {1'b0, product, 3'b0} +
+                           {1'b0, addend_twos[50:0]} + {51'b0, subtract};
+    wire [25:0] upper_base = addend_twos[76:51];
+    wire [25:0] upper_carry_prefix;
+    assign upper_carry_prefix[0] = 1'b1;
+    for (genvar j = 1; j < 26; j = j + 1) begin : upper_prefix_bits
+        assign upper_carry_prefix[j] = &upper_base[j-1:0];
+    end
+    // 下位carryが立つ場合だけ、+1で反転する上位bitを切り替える。
+    wire [76:0] sum = {upper_base ^ (upper_carry_prefix & {26{lower_sum[51]}}),
+                       lower_sum[50:0]};
     wire sum_zero = sum == 77'b0;
     wire sum_sign = sum_zero ? (subtract ? round_down : product_sign) : product_sign ^ sum[76];
 
-    // 負値は|sum|-1のまま先頭位置を探し、二の補数の+1を最終丸めへ送る。
-    // 隣接bit間の最上位の遷移は、符号反転後の最上位1と同じ位置になる。
-    wire [75:0] leading_input = sum[75:0] ^ sum[76:1];
-    reg [6:0] leading_index;
+    // normal加数の上位距離は整列距離から求める。上位が減算で消える場合は下位を使う。
+    wire upper_nonzero = |aligned_addend[75:51];
+    wire upper_active = upper_nonzero &&
+        !(subtract && lower_sum[51] && aligned_addend[75:51] == 25'd1);
+    wire upper_denormal = upper_nonzero && !c_significand[23];
+    // +1の伝播範囲外に元の1が残らなければ、先頭距離を1だけ補正する。
+    wire upper_step = ~|(aligned_addend[75:51] & ~upper_carry_prefix[24:0]);
+    // 上位採用時の距離は0〜25。加算は-1、減算は+1を5 bitで表す。
+    wire [4:0] upper_shift_delta = upper_step ? (subtract ? 5'd1 : 5'd31) : 5'd0;
+    wire [4:0] upper_shift_carry = alignment_shift[4:0] + upper_shift_delta;
+    // 負値は|sum|-1の先頭を使い、絶対値化の+1は最終丸めへ送る。
+    // 下位内部50遷移を検出し、carryに依存する境界bit 50を後から選ぶ。
+    wire [49:0] leading_input = lower_sum[49:0] ^ lower_sum[50:1];
+    reg [6:0] lower_zeros;
     always_comb begin
-        leading_index = 7'b0;
-        for (integer i = 0; i < 76; i = i + 1) begin
-            if (leading_input[i]) leading_index = 7'(i);
+        lower_zeros = 7'd75;
+        for (integer i = 0; i < 50; i = i + 1) begin
+            if (leading_input[i]) lower_zeros = 7'(75 - i);
         end
     end
-
-    wire [6:0] leading_zeros = 7'd75 - leading_index;
-    wire signed [9:0] normalized_exponent = product_exponent + $signed({3'b0, leading_index}) - 10'sd49;
-    wire subnormal = normalized_exponent <= 10'sd0;
+    wire boundary_transition = addend_twos[51] ^ lower_sum[51] ^ lower_sum[50];
+    // 距離は76 bit全体の上端基準。境界50／carry51にも同じ符号化を使う。
+    wire [6:0] lower_shift = !subtract && lower_sum[51] ? 7'd24 :
+                           boundary_transition ? 7'd25 : lower_zeros;
+    wire [6:0] leading_zeros = upper_active ?
+        {2'b0, (lower_sum[51] ? upper_shift_carry : alignment_shift[4:0])} : lower_shift;
+    wire signed [9:0] normalized_exponent = product_exponent + 10'sd26 - $signed({3'b0, leading_zeros});
+    // 上位に残るsubnormal加数は固定格子で扱い、指数0/1を丸め後に判定する。
+    wire subnormal = upper_denormal || normalized_exponent <= 10'sd0;
     // 仮数24 bitとguard/roundを残す窓を段階ごとに狭める。
     // 左shiftの上限Ep+25は、subnormalで出力の最下位桁を固定するためのbudget。
     wire signed [9:0] shift_budget = product_exponent + 10'sd25;
