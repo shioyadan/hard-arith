@@ -154,11 +154,24 @@ module FP32FMA (
     wire [24:0] rounded = {1'b0, grs[26:3]} + {24'b0, increment};
     wire [9:0] result_exponent = subnormal ? {9'b0, rounded[23]} :
                                            $unsigned(normalized_exponent) + {9'b0, rounded[24]};
-    wire [22:0] result_fraction = rounded[24] ? rounded[23:1] : rounded[22:0];
     wire overflow_to_inf = rounding_mode == RNE || rounding_mode == RMM ||
                            (round_down && sum_sign) || (round_up && !sum_sign);
     wire [31:0] overflow_result = {sum_sign, overflow_to_inf ? 31'h7f800000 : 31'h7f7fffff};
-    wire [31:0] finite_result = result_exponent >= 10'd255 ? overflow_result :
-                               {sum_sign, result_exponent[7:0], result_fraction};
-    assign result = bypass ? bypass_value : sum_zero ? {sum_sign, 31'b0} : finite_result;
+    wire output_overflow = result_exponent >= 10'd255;
+    // fractionの通常値・加数・最大有限値・NaNを、排他的な条件で合成する。
+    wire output_finite = !bypass && !sum_zero;
+    wire output_regular = output_finite && !output_overflow;
+    wire output_maximum = output_finite && output_overflow && !overflow_to_inf;
+    wire output_addend = !nan_result && !inf_result && addend_dominates;
+    wire output_fraction_enable = output_regular;
+    wire [22:0] output_fraction =
+        (rounded[22:0] & {23{output_fraction_enable}}) |
+        (dominant_result[22:0] & {23{output_addend}}) |
+        {23{output_maximum}} | {nan_result, 22'b0};
+    // 符号・指数は従来の優先順位を維持する。carryで指数まで0にしない。
+    wire [8:0] finite_upper = output_overflow ? overflow_result[31:23] :
+                                                   {sum_sign, result_exponent[7:0]};
+    wire [8:0] output_upper = bypass ? bypass_value[31:23] :
+                             sum_zero ? {sum_sign, 8'b0} : finite_upper;
+    assign result = {output_upper, output_fraction};
 endmodule
