@@ -17,6 +17,7 @@
 | [`fp32_exp2/`](fp32_exp2/) | `2^x` | 全出力範囲でfaithful | gradual underflow出力に対応 | 非NaN領域で単調非減少 |
 | [`fp32_recip/`](fp32_recip/) | `1/x` | 結果がnormalとなる範囲でfaithful | 入出力ともFTZ | 負領域・正領域ごとに単調非増加 |
 | [`fp32_rsqrt/`](fp32_rsqrt/) | `1/sqrt(x)` | 正のnormal入力でfaithful | subnormal入力はFTZ | `+0`から`+Inf`まで単調非増加 |
+| [`fp32_fma/`](fp32_fma/) | `a*b+c`（FMA） | 指定モードで正しい一回丸め | 入出力とも対応、FTZなし | 専用の単調性検査は未実施 |
 | [`fp32_elementary/`](fp32_elementary/) | `1/x`、`sqrt(x)`、`1/sqrt(x)`、`sin(pi*x)`、`cos(pi*x)`、`log2(x)`、`2^x`の選択出力 | 関数別のULP／絶対誤差条件 | 入出力ともFTZ | exp2全入力と他関数の縮約全数で逆行0。sin/cosは増減方向が一定の区間で検査 |
 | [`fp32_exp_recip_rsqrt/`](fp32_exp_recip_rsqrt/) | `exp(x)`、`1/x`、`1/sqrt(x)`の選択出力 | 有限非zero結果でRNE参照値から最大1 step | 合成時に入出力対応／FTZを選択。既定はFTZ | 各演算の定義域で保持 |
 | [`fp16_bf16_exp_recip_rsqrt/`](fp16_bf16_exp_recip_rsqrt/) | FP16／BF16の`exp(x)`、`1/x`、`1/sqrt(x)`の選択出力 | 有限非zero結果でRNE参照値から最大1 step | 入出力とも対応。合成時パラメータでFTZも選択可能 | 各演算の定義域で保持 |
@@ -27,12 +28,12 @@ faithfulは、無限精度の値を挟む二つのbinary32値のどちらかを�
 
 三機能版の最大1 stepは、対象形式へ正しく丸めた参照値との表現可能な値の間隔であり、faithfulの保証ではありません。
 
-FP32の各演算ディレクトリは、直下に合成対象のRTL、`test/`に検証コード、
-`tools/`に実装固有の生成スクリプトを持ちます。FP16／BF16版は`rtl/`にRTL、
+FP32の各演算ディレクトリは、直下に合成対象のRTL、`test/`に検証コードを持ち、
+定数生成が必要な演算器は`tools/`に生成スクリプトを置きます。FP16／BF16版は`rtl/`にRTL、
 直下に検証コードと生成スクリプトを置きます。NaN、Inf、符号付きzeroなどの特殊値、
 丸めの適用範囲、アルゴリズムの詳細は各ディレクトリの`README.md`を参照してください。
 
-### 積和演算器の試作
+### 積和演算器
 
 [`fp32_fma/`](fp32_fma/)に、FP32の`a*b+c`を処理する組合せ回路`FP32FMA`を置いています。
 `rounding_mode`入力でRNE・RTZ・RDN・RUP・RMMを選び、最後に一度だけ丸めます。
@@ -44,7 +45,7 @@ FP32の各演算ディレクトリは、直下に合成対象のRTL、`test/`に
 ## 合成時パラメータ
 
 合成時パラメータは、モジュールのインスタンス化時に指定して回路構成を固定する設定です。
-実行時に演算を選ぶ`op`や、形式を選ぶ`is_bf16`入力とは異なります。
+実行時に演算を選ぶ`op`、形式を選ぶ`is_bf16`、丸めモードを選ぶ`rounding_mode`入力とは異なります。
 公開トップで制御できる項目は次のとおりです。リンク先に設定値・既定値・使用例を示します。
 
 | ユニット | パラメータ | 制御できる内容 |
@@ -53,6 +54,7 @@ FP32の各演算ディレクトリは、直下に合成対象のRTL、`test/`に
 | [`FP32Exp2`](fp32_exp2/README.md#合成時パラメータ) | なし | FP32の底2指数関数、出力subnormal対応で固定 |
 | [`FP32Recip`](fp32_recip/README.md#合成時パラメータ) | なし | FP32の逆数、入出力FTZで固定 |
 | [`FP32Rsqrt`](fp32_rsqrt/README.md#合成時パラメータ) | なし | FP32の逆平方根、入力FTZで固定 |
+| [`FP32FMA`](fp32_fma/README.md#合成時パラメータ) | なし | FP32の積和、入出力subnormal対応で固定。丸めモードは実行時入力で選択 |
 | [`FP32Elementary`](fp32_elementary/README.md#合成時パラメータ) | 六つの`ENABLE_*` | exp2、recip、rsqrt、sqrt、log2を個別に、sinpi／cospiを一括で有効・無効化。既定は全機能有効 |
 | [`FP32ExpRecipRsqrt`](fp32_exp_recip_rsqrt/README.md#合成時パラメータ) | `SUPPORT_SUBNORMAL` | 入出力subnormal対応／FTZを選択。既定はFTZ。exp／recip／rsqrtはすべて搭載 |
 | [`FP16BF16ExpRecipRsqrtStudy`](fp16_bf16_exp_recip_rsqrt/README.md#合成時パラメータ) | `FORMAT_MODE`、`SUPPORT_SUBNORMAL` | 形式の実行時切替／FP16専用／BF16専用と、入出力subnormal対応／FTZを選択。既定は形式の実行時切替・subnormal対応 |
@@ -65,7 +67,7 @@ FP32の各演算ディレクトリは、直下に合成対象のRTL、`test/`に
 
 ## 検証
 
-「実装済みの演算」の表にあるunitのlintとテストはリポジトリ直下から実行できます。
+「実装済みの演算」の表にある全unitのlintと通常テストは、リポジトリ直下から一括実行できます。
 
 ```sh
 make lint
@@ -74,8 +76,9 @@ make exhaustive
 make constants-check
 ```
 
-FMA試作はこの一括対象には含めず、`make lint-fp32_fma`、`make test-fp32_fma`、
-`make -C fp32_fma stress`で個別に検証します。依存環境と検査範囲はunit READMEを参照してください。
+`make exhaustive`と`make constants-check`は対応するunitだけを対象とし、FMAは含みません。
+FMAの追加標本検査は`make -C fp32_fma stress`で実行します。
+依存環境と検査範囲は各unit READMEを参照してください。
 
 `FP32Elementary`の機能選択設定の全64組合せは
 `make test-configs-fp32_elementary`で検査します。詳細は[unit README](fp32_elementary/README.md)を参照してください。
@@ -101,6 +104,8 @@ make lint-fp32_rsqrt
 make test-fp32_rsqrt
 make exhaustive-fp32_rsqrt
 make monotonic-fp32_rsqrt
+make lint-fp32_fma
+make test-fp32_fma
 make lint-fp32_elementary
 make test-fp32_elementary
 make exhaustive-fp32_elementary EXHAUSTIVE_THREADS=22
